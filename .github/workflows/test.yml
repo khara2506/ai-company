@@ -1,0 +1,30 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests (standard library only)
+        working-directory: plugins/ai-company
+        run: python -m unittest discover -s tests -v
+      - name: Smoke run on a fake home (collect -> render)
+        run: |
+          python plugins/ai-company/tests/fakes.py "$RUNNER_TEMP/fake" medium new
+          python plugins/ai-company/scripts/collect.py --claude-dir "$RUNNER_TEMP/fake/.claude" --out-dir "$RUNNER_TEMP/out/work"
+          code=$(python plugins/ai-company/scripts/render.py --work-dir "$RUNNER_TEMP/out/work" --out-dir "$RUNNER_TEMP/out" | sed -n 's/^APPROVE_CODE: //p')
+          python plugins/ai-company/scripts/render.py --work-dir "$RUNNER_TEMP/out/work" --out-dir "$RUNNER_TEMP/out" --approve "$code" | tee "$RUNNER_TEMP/render.log"
+          grep -q "^STATUS: done$" "$RUNNER_TEMP/render.log"

@@ -1,0 +1,6 @@
+{
+  "name": "ai-company",
+  "description": "自分の Claude Code の使い方を「AI 会社」の組織図・社員名簿・社史・求人票にして見せる。",
+  "version": "0.1.2",
+  "license": "MIT"
+}

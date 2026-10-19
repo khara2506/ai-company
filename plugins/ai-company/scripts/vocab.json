@@ -1,0 +1,521 @@
+{
+ "version": 1,
+ "departments": [
+  {
+   "id": "general",
+   "name": "総務部",
+   "title": "総務担当",
+   "code": "GEN"
+  },
+  {
+   "id": "accounting",
+   "name": "経理部",
+   "title": "経理担当",
+   "code": "ACC"
+  },
+  {
+   "id": "sales",
+   "name": "営業部",
+   "title": "営業担当",
+   "code": "SAL"
+  },
+  {
+   "id": "pr",
+   "name": "広報部",
+   "title": "広報担当",
+   "code": "PRO"
+  },
+  {
+   "id": "dev",
+   "name": "開発部",
+   "title": "開発担当",
+   "code": "DEV"
+  },
+  {
+   "id": "it",
+   "name": "情報システム部",
+   "title": "情報システム担当",
+   "code": "ITS"
+  },
+  {
+   "id": "legal",
+   "name": "法務部",
+   "title": "法務担当",
+   "code": "LEG"
+  },
+  {
+   "id": "planning",
+   "name": "企画部",
+   "title": "企画担当",
+   "code": "PLN"
+  },
+  {
+   "id": "research",
+   "name": "調査部",
+   "title": "調査担当",
+   "code": "RES"
+  },
+  {
+   "id": "editorial",
+   "name": "制作部",
+   "title": "制作担当",
+   "code": "EDT"
+  },
+  {
+   "id": "qa",
+   "name": "品質管理部",
+   "title": "品質管理担当",
+   "code": "QAC"
+  },
+  {
+   "id": "secretary",
+   "name": "秘書室",
+   "title": "秘書担当",
+   "code": "SEC"
+  }
+ ],
+ "works": [
+  {
+   "id": "invoice",
+   "name": "請求書の作成",
+   "dept": "accounting"
+  },
+  {
+   "id": "expense",
+   "name": "経費の整理",
+   "dept": "accounting"
+  },
+  {
+   "id": "tax",
+   "name": "確定申告の準備",
+   "dept": "accounting"
+  },
+  {
+   "id": "bookkeeping",
+   "name": "記帳・仕訳",
+   "dept": "accounting"
+  },
+  {
+   "id": "quote",
+   "name": "見積書の作成",
+   "dept": "sales"
+  },
+  {
+   "id": "proposal",
+   "name": "提案資料の作成",
+   "dept": "sales"
+  },
+  {
+   "id": "meeting_minutes",
+   "name": "議事録の作成",
+   "dept": "secretary"
+  },
+  {
+   "id": "schedule",
+   "name": "日程調整",
+   "dept": "secretary"
+  },
+  {
+   "id": "email_draft",
+   "name": "メールの下書き",
+   "dept": "secretary"
+  },
+  {
+   "id": "email_reply",
+   "name": "問い合わせへの返信",
+   "dept": "secretary"
+  },
+  {
+   "id": "todo_mgmt",
+   "name": "タスクの整理",
+   "dept": "secretary"
+  },
+  {
+   "id": "sns_post",
+   "name": "SNS投稿の作成",
+   "dept": "pr"
+  },
+  {
+   "id": "newsletter",
+   "name": "メルマガの作成",
+   "dept": "pr"
+  },
+  {
+   "id": "article",
+   "name": "記事・ブログの執筆",
+   "dept": "editorial"
+  },
+  {
+   "id": "slides",
+   "name": "スライドの作成",
+   "dept": "editorial"
+  },
+  {
+   "id": "image",
+   "name": "画像の作成",
+   "dept": "editorial"
+  },
+  {
+   "id": "video",
+   "name": "動画の編集",
+   "dept": "editorial"
+  },
+  {
+   "id": "translation",
+   "name": "翻訳",
+   "dept": "editorial"
+  },
+  {
+   "id": "proofreading",
+   "name": "文章の校正",
+   "dept": "editorial"
+  },
+  {
+   "id": "summary",
+   "name": "資料の要約",
+   "dept": "research"
+  },
+  {
+   "id": "web_research",
+   "name": "Webでの調べもの",
+   "dept": "research"
+  },
+  {
+   "id": "competitor",
+   "name": "競合の調査",
+   "dept": "research"
+  },
+  {
+   "id": "data_analysis",
+   "name": "データの集計・分析",
+   "dept": "research"
+  },
+  {
+   "id": "report",
+   "name": "レポートの作成",
+   "dept": "research"
+  },
+  {
+   "id": "learning",
+   "name": "学習・勉強の補助",
+   "dept": "research"
+  },
+  {
+   "id": "code_feature",
+   "name": "機能の実装",
+   "dept": "dev"
+  },
+  {
+   "id": "bugfix",
+   "name": "不具合の修正",
+   "dept": "dev"
+  },
+  {
+   "id": "refactor",
+   "name": "コードの整理",
+   "dept": "dev"
+  },
+  {
+   "id": "deploy",
+   "name": "デプロイ・公開",
+   "dept": "dev"
+  },
+  {
+   "id": "tech_docs",
+   "name": "技術文書の作成",
+   "dept": "dev"
+  },
+  {
+   "id": "code_review",
+   "name": "コードレビュー",
+   "dept": "qa"
+  },
+  {
+   "id": "testing",
+   "name": "テストの作成・実行",
+   "dept": "qa"
+  },
+  {
+   "id": "infra",
+   "name": "サーバー・環境の設定",
+   "dept": "it"
+  },
+  {
+   "id": "automation",
+   "name": "定型作業の自動化",
+   "dept": "it"
+  },
+  {
+   "id": "script",
+   "name": "スクリプトの作成",
+   "dept": "it"
+  },
+  {
+   "id": "account_mgmt",
+   "name": "アカウント・権限の管理",
+   "dept": "it"
+  },
+  {
+   "id": "backup",
+   "name": "バックアップ・保守",
+   "dept": "it"
+  },
+  {
+   "id": "contract",
+   "name": "契約書の確認",
+   "dept": "legal"
+  },
+  {
+   "id": "policy",
+   "name": "規約・方針の確認",
+   "dept": "legal"
+  },
+  {
+   "id": "ideation",
+   "name": "企画・アイデア出し",
+   "dept": "planning"
+  },
+  {
+   "id": "roadmap",
+   "name": "計画・工程表の作成",
+   "dept": "planning"
+  },
+  {
+   "id": "faq",
+   "name": "問い合わせ対応の準備",
+   "dept": "general"
+  },
+  {
+   "id": "spreadsheet",
+   "name": "表計算の作成",
+   "dept": "general"
+  }
+ ],
+ "other_work": {
+  "id": "other",
+  "name": "その他の定型作業",
+  "dept": "general"
+ },
+ "generic_words": [
+  "agent",
+  "agents",
+  "app",
+  "applications",
+  "apps",
+  "archive",
+  "assets",
+  "backend",
+  "backup",
+  "backups",
+  "bin",
+  "build",
+  "cache",
+  "changelog",
+  "claude",
+  "client",
+  "cloud",
+  "code",
+  "common",
+  "config",
+  "configs",
+  "content",
+  "core",
+  "css",
+  "data",
+  "demo",
+  "demos",
+  "desktop",
+  "dev",
+  "dist",
+  "doc",
+  "docs",
+  "documents",
+  "downloads",
+  "draft",
+  "drafts",
+  "drive",
+  "dropbox",
+  "etc",
+  "example",
+  "examples",
+  "file",
+  "files",
+  "folder",
+  "folders",
+  "frontend",
+  "github",
+  "gitlab",
+  "google",
+  "home",
+  "hook",
+  "hooks",
+  "html",
+  "image",
+  "images",
+  "input",
+  "inputs",
+  "java",
+  "json",
+  "lib",
+  "library",
+  "libs",
+  "license",
+  "local",
+  "main",
+  "markdown",
+  "master",
+  "media",
+  "memory",
+  "mnt",
+  "module",
+  "modules",
+  "music",
+  "node",
+  "node_modules",
+  "note",
+  "notes",
+  "onedrive",
+  "opt",
+  "output",
+  "outputs",
+  "package",
+  "packages",
+  "page",
+  "pages",
+  "pictures",
+  "plugin",
+  "plugins",
+  "private",
+  "program",
+  "programs",
+  "project",
+  "projects",
+  "public",
+  "python",
+  "readme",
+  "release",
+  "releases",
+  "repo",
+  "report",
+  "reports",
+  "repos",
+  "result",
+  "results",
+  "ruby",
+  "rust",
+  "sample",
+  "samples",
+  "script",
+  "scripts",
+  "server",
+  "share",
+  "site",
+  "sites",
+  "skill",
+  "skills",
+  "source",
+  "sources",
+  "src",
+  "static",
+  "system",
+  "temp",
+  "template",
+  "templates",
+  "test",
+  "tests",
+  "tmp",
+  "tool",
+  "tools",
+  "user",
+  "users",
+  "usr",
+  "util",
+  "utils",
+  "var",
+  "vendor",
+  "videos",
+  "volumes",
+  "web",
+  "windows",
+  "work",
+  "works",
+  "workspace",
+  "workspaces",
+  "yaml"
+ ],
+ "public_marketplace_repos": [
+  "anthropics/claude-plugins-official",
+  "anthropics/claude-code",
+  "anthropics/skills"
+ ],
+ "public_marketplace_names": [
+  "claude-plugins-official"
+ ],
+ "public_skill_repos": [
+  "garrytan/gstack",
+  "vercel-labs/agent-skills",
+  "vercel-labs/skills",
+  "remotion-dev/skills"
+ ],
+ "builtin_agents": [
+  "general-purpose",
+  "Explore",
+  "Plan",
+  "statusline-setup",
+  "claude-code-guide"
+ ],
+ "builtin_skills": [
+  "artifact-capabilities",
+  "artifact-design",
+  "artifact-diagramming",
+  "claude-api",
+  "code-review",
+  "dataviz",
+  "fewer-permission-prompts",
+  "init",
+  "keybindings-help",
+  "loop",
+  "plugin-authoring",
+  "run",
+  "schedule",
+  "security-review",
+  "simplify",
+  "skill-doctor",
+  "update-config",
+  "workflow-authoring"
+ ],
+ "builtin_skill_prefixes": [
+  "anthropic-skills:"
+ ],
+ "builtin_commands": [
+  "clear",
+  "compact",
+  "help",
+  "model",
+  "config",
+  "init",
+  "review",
+  "cost",
+  "context",
+  "resume",
+  "exit",
+  "login",
+  "logout",
+  "status",
+  "doctor",
+  "memory",
+  "permissions",
+  "agents",
+  "mcp",
+  "plugin",
+  "hooks",
+  "terminal-setup",
+  "vim",
+  "usage",
+  "rewind",
+  "export",
+  "add-dir",
+  "bug",
+  "release-notes"
+ ]
+}

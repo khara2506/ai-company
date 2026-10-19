@@ -1,0 +1,18 @@
+{
+  "name": "ai-company",
+  "owner": { "name": "khara2506" },
+  "metadata": { "description": "自分の Claude Code の使い方を「AI 会社」の組織図・社員名簿・社史・求人票にして見せるプラグイン。" },
+  "plugins": [
+    {
+      "name": "ai-company",
+      "source": "./plugins/ai-company",
+      "description": "~/.claude のスキルと会話の記録から、自分の AI 会社の組織図・社員名簿・社史・求人票と、X に貼る画像を作る。どこにも送らない（手順2の判断は Claude が行う）。",
+      "version": "0.1.2",
+      "author": { "name": "khara2506" },
+      "repository": "https://github.com/khara2506/ai-company",
+      "license": "MIT",
+      "category": "productivity",
+      "tags": ["organization", "visualization", "skills", "usage"]
+    }
+  ]
+}
