@@ -29,6 +29,7 @@ SKILL_DOC_URL = "https://code.claude.com/docs/en/skills"
 DEFAULT_COMPANY = "わたしの AI 会社"
 WINDOW_DAYS = 30
 JOB_MIN = 5
+SMALL_SAMPLE = 30  # 抜き出しがこれより少ないときは全件へ引き伸ばさない（少ない材料からの推定は外れやすい）
 JOB_MAX = 3
 MAX_DEPTS = 7
 ROSTER_LIMIT = 10
@@ -210,14 +211,17 @@ def build_model(company, org, vocab, history_rows=None):
     typed = company.get("typed", {})
     total, sample_n = typed.get("total_30d", 0), typed.get("sample_n", 0)
     sampled = total > sample_n > 0
+    small = sampled and sample_n < SMALL_SAMPLE
+    prefix = "少なくとも" if small else ("約" if sampled else "")
     jobs = []
     for j in org["jobs"]:
         if j["covered"] or j["work"] == vocab["other_work"]["id"] or sample_n <= 0:
             continue
-        est = round(j["count"] * total / sample_n) if sampled else j["count"]
+        est = round(j["count"] * total / sample_n) if sampled and not small else j["count"]
         if est >= JOB_MIN:
             w = works[j["work"]]
-            jobs.append({"work": w["name"], "dept": depts[w["dept"]]["title"], "est": est, "sampled": sampled})
+            jobs.append({"work": w["name"], "dept": depts[w["dept"]]["title"], "est": est, "sampled": sampled,
+                         "prefix": prefix})
     jobs.sort(key=lambda x: (-x["est"], x["work"]))
     jobs = jobs[:JOB_MAX]
 
@@ -237,7 +241,7 @@ def build_model(company, org, vocab, history_rows=None):
         "retention_days": company.get("retention_days"),
         "emps": emps, "retired": retired, "dept_rows": dept_rows, "dept_name": dept_name,
         "top": top, "new_hires": new_hires, "agents": agents, "jobs": jobs,
-        "typed_found": bool(typed.get("found")), "sampled": sampled,
+        "typed_found": bool(typed.get("found")), "sampled": sampled, "small_sample": small,
         "timeline": build_timeline(emps, retired, founded, today, rows, dept_name),
         "has_typed_data": has_records and bool(typed.get("found")),
     }
@@ -348,7 +352,7 @@ def alt_text(m, mode):
     if m["jobs"]:
         j = m["jobs"][0]
         parts.append("求人は%s、%s（この30日で%s%d回、手で対応）" % (
-            j["dept"], j["work"], "約" if j["sampled"] else "", j["est"]))
+            j["dept"], j["work"], j["prefix"], j["est"]))
     return "。".join(parts) + "。"
 
 
@@ -442,7 +446,7 @@ def build_svg(m, mode="share"):
         txt(M + 28, top + 44, "求人", 26, C["faint"])
         title = fit("%s　%s" % (j["dept"], j["work"]), 40, cw - 56 - 150)
         txt(M + 28, top + 94, title, 40, C["text"], 700)
-        txt(M + 28, top + 134, "この30日で%s%d回、手で対応" % ("約" if j["sampled"] else "", j["est"]), 30, C["muted"])
+        txt(M + 28, top + 134, "この30日で%s%d回、手で対応" % (j["prefix"], j["est"]), 30, C["muted"])
         seal(W - M - 66, top + 70, 44, "募集")
         y = top + box_h
     y = max(y + 46, H - 112)  # 末尾の表記は下端にそろえる（中身が少ないときに下が空かない）
@@ -590,7 +594,7 @@ def job_prompt(j):
     return ("「%s」を、ふだん手で何度も頼んでいます（この30日で%s%d回）。"
             "この作業を自動でやってくれる Claude Code のスキルを作ってください。"
             "最初に、いつもどう頼んでいるかを私に聞いてから、SKILL.md の案を出してください。"
-            % (j["work"], "約" if j["sampled"] else "", j["est"]))
+            % (j["work"], j["prefix"], j["est"]))
 
 
 EMPTY_PROMPT = ("Claude Code で毎回手で頼んでいる作業を1つ選んで、それを自動でやってくれるスキルを作ってください。"
@@ -728,14 +732,16 @@ def build_html(m, mode, svg=None):
     elif not m["jobs"]:
         w('<div class="empty"><p>今は求人はありません。手で頼んでいる作業で、この30日に%d回以上のものは見つかりませんでした。</p></div>' % JOB_MIN)
     else:
-        if m["sampled"]:
+        if m["small_sample"]:
+            w('<p class="small">人が打った文が少ないため、抜き出しの中で数えた回数です（実際はもっと多いことがあります）。</p>')
+        elif m["sampled"]:
             w('<p class="small">人が打った文の抜き出し（最大300件）からの推定です。</p>')
         for i, j in enumerate(m["jobs"]):
             w('<div class="job"><h3>求人：%s</h3><p class="kv">仕事の内容：%s</p><p class="kv">この30日で%s%d回、手で対応</p>'
               '<p class="small">いちばん大事なこと：この作業をスキルにする</p>'
               '<p class="prompt" id="jp-%d">%s</p><div class="actions"><button class="primary" type="button" data-copy="jp-%d">依頼文をコピー</button>'
               '<a class="btn" href="%s">スキルの作り方（公式）</a></div></div>' % (
-                  esc(j["dept"]), esc(j["work"]), "約" if j["sampled"] else "", j["est"], i, esc(job_prompt(j)), i, SKILL_DOC_URL))
+                  esc(j["dept"]), esc(j["work"]), j["prefix"], j["est"], i, esc(job_prompt(j)), i, SKILL_DOC_URL))
     w("</section></main>")
     w("<footer>")
     if share:
@@ -885,7 +891,7 @@ def share_strings(m):
     out.append(("実名にしたスキル", sorted({e["share"] for e in emps if not e["public"] and e["share"] != e["title"]})))
     out.append(("外部スタッフ", sorted({a["share"] for a in m["agents"]})))
     out.append(("部署名", [n for _, n, _ in m["dept_rows"]]))
-    out.append(("求人票", ["%s／%s（この30日で%s%d回）" % (j["dept"], j["work"], "約" if j["sampled"] else "", j["est"]) for j in m["jobs"]]))
+    out.append(("求人票", ["%s／%s（この30日で%s%d回）" % (j["dept"], j["work"], j["prefix"], j["est"]) for j in m["jobs"]]))
     return [(k, v) for k, v in out if v]
 
 
@@ -1000,6 +1006,13 @@ def main(argv=None):
     if not company.get("today"):
         print("STATUS: error\ncompany.json を読めません。先に collect.py を実行してください", file=sys.stderr)
         return 2
+    misplaced = os.path.join(args.work_dir, "org.json")
+    if not args.org and not os.path.exists(org_path) and os.path.exists(misplaced):
+        # 手順3で work/ に書かれた org.json を黙って無視しない（2026-10-21 試しで会社名が消えた）
+        print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
+        os.replace(misplaced, org_path)
+    elif os.path.exists(misplaced):
+        print("注意: %s は読みません。会社名などは %s に書いてください" % (misplaced, org_path))
     org = normalize_org(load_json(org_path, {}), company, vocab, warn=lambda s: print("注意: " + s))
     rows = read_history(hist_path)
 
@@ -1042,6 +1055,11 @@ def main(argv=None):
         # 語と場所は端末にだけ出す。ファイルには書かない（R2-6）
         for kind, term, loc in hits:
             print("LEAK: 種類=%s 場所=%s 語=%s" % (kind, loc, term))
+        named = sorted({t for _, t, _ in hits if t.lower() in (org.get("company_name") or "").lower()})
+        if named:
+            print("ヒント: %s はあなたが付けた会社名にも入っています。手元の%sと同じ綴りのため止まりました。"
+                  "会社名として出してよければ --resolve allow、隠したければ会社名を変えるか --resolve mask"
+                  % (" / ".join(named), "・".join(sorted({k for k, t, _ in hits if t in named}))))
         print("share.html は書いていません。続け方: --resolve mask（伏せ字にして作り直す）／--resolve allow（この語を許可する）／やめる")
         write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
         print("STATUS: leak")

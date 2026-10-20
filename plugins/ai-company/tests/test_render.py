@@ -139,6 +139,12 @@ class LeakTests(unittest.TestCase):
             self.assertFalse(env.exists("share.html"))  # 前回の分も消えている
         self.assertTrue(env.exists("portal.html"))  # 手元の版は作る
 
+    def test_hint_when_leak_word_is_in_own_company_name(self):
+        env = Env(self, "small", leaky=True, org={"company_name": "Globex 商事の AI 会社", "people": {}})
+        rc, out = env.run()
+        self.assertEqual(rc, 3)
+        self.assertIn("ヒント: globex はあなたが付けた会社名にも入っています", out)
+
     def test_leak_words_not_written_to_files_other_than_user_inputs(self):
         env = Env(self, "small", leaky=True, org={"company_name": "Globex 商事の AI 会社", "people": {}})
         env.run("--approve")
@@ -303,6 +309,20 @@ class Titles(unittest.TestCase):
         self.assertEqual(again["letters"], org["letters"])
 
 
+class OrgPlace(unittest.TestCase):
+    def test_org_written_in_work_folder_is_used_and_moved(self):
+        """手順3で org.json を work/ に書いても、黙って無視しない（2026-10-21 試しで会社名が消えた）。"""
+        env = Env(self, "small")
+        os.remove(os.path.join(env.out, "org.json"))
+        with open(os.path.join(env.work, "org.json"), "w", encoding="utf-8") as f:
+            json.dump({"company_name": "エーワン研究所", "people": {}}, f, ensure_ascii=False)
+        rc, out = env.run()
+        self.assertIn("org.json が", out)
+        self.assertEqual(env.org()["company_name"], "エーワン研究所")
+        self.assertFalse(os.path.exists(os.path.join(env.work, "org.json")))
+        self.assertIn("[会社名] エーワン研究所", out)
+
+
 class Jobs(unittest.TestCase):
     def model(self, jobs, total, sample, extra=None):
         company = {"today": "2026-10-08", "founded": "2026-06-01", "range": {"oldest": "2026-08-08", "newest": "2026-10-08"},
@@ -319,6 +339,14 @@ class Jobs(unittest.TestCase):
     def test_no_sampling_when_300_or_fewer(self):
         m = self.model([{"work": "invoice", "count": 7}], 120, 120)
         self.assertEqual((m["jobs"][0]["est"], m["jobs"][0]["sampled"]), (7, False))
+
+    def test_small_sample_is_not_stretched(self):
+        """抜き出しが少ないときは全件へ引き伸ばさず「少なくとも」と出す（2026-10-21 試しで 2件中1件が約5回になった）。"""
+        m = self.model([{"work": "invoice", "count": 1}, {"work": "expense", "count": 6}], 10, 8)
+        self.assertEqual([(j["work"], j["est"], j["prefix"]) for j in m["jobs"]], [("経費の整理", 6, "少なくとも")])
+        self.assertTrue(m["small_sample"])
+        m = self.model([{"work": "invoice", "count": 12}], 600, 300)
+        self.assertEqual((m["jobs"][0]["est"], m["jobs"][0]["prefix"]), (24, "約"))
 
     def test_top_three_and_other_excluded(self):
         jobs = [{"work": w, "count": c} for w, c in (("invoice", 9), ("expense", 8), ("report", 7), ("slides", 6), ("other", 99))]

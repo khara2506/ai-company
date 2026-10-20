@@ -794,7 +794,7 @@ def summary(c):
             sum(1 for x in c["skills"] if x["kind"] == "plugin"), len(c["agents"]), len(c["retired"])),
         "記録 %d ファイル・%d 行（読めなかった行 %d）／範囲 %s 〜 %s" % (
             s["files"], s["lines"], s["bad_lines"], c["range"]["oldest"], c["range"]["newest"]),
-        "人が打った文（この30日）%d 件、抜き出し %d 件（%d 字）" % (
+        "人が打った文（この30日）%d 件、抜き出し %d 件（%d 字。同じ文は1件にまとめ、多いときは日ごとに均して選ぶ）" % (
             c["typed"]["total_30d"], c["typed"]["sample_n"], c["typed"]["chars"]),
         "創業日 %s" % c["founded"],
     ]
@@ -816,7 +816,7 @@ def main(argv=None):
     if sys.version_info < (3, 9):
         eprint("Python 3.9 以上が必要です")
         return 2
-    today = date.fromisoformat(args.today) if args.today else datetime.now(timezone.utc).date()
+    today = date.fromisoformat(args.today) if args.today else date.today()  # 手元の時計の日付（日本で朝9時前でも前日にしない）
     history = args.history or os.path.join(os.path.dirname(os.path.abspath(args.out_dir)), "history.jsonl")
     c = collect(args.claude_dir, args.out_dir, today, history_path=history)
     print(summary(c))

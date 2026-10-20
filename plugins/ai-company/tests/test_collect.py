@@ -509,6 +509,13 @@ class Counting(unittest.TestCase):
         self.assertEqual(typed, [])
 
 
+    def test_summary_says_why_sample_is_smaller(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.make_home(tmp.name, "small")
+        c, _, _ = run_collect(h)
+        self.assertIn("同じ文は1件にまとめ", collect.summary(c))
+
     def test_short_replies_are_not_typed(self):
         """「はい」「続けて」などの短い返事は作業の種類が分からないので抜き出さない（2026-10-09 本人の環境で半分強がこれだった）。"""
         tmp = tempfile.TemporaryDirectory()

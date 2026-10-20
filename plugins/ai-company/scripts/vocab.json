@@ -226,6 +226,21 @@
    "dept": "dev"
   },
   {
+   "id": "deps_update",
+   "name": "依存パッケージの更新",
+   "dept": "dev"
+  },
+  {
+   "id": "performance",
+   "name": "表示速度・性能の調査",
+   "dept": "dev"
+  },
+  {
+   "id": "db_change",
+   "name": "データベースの変更",
+   "dept": "dev"
+  },
+  {
    "id": "code_review",
    "name": "コードレビュー",
    "dept": "qa"
