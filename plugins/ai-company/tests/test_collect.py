@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -274,6 +275,18 @@ class WhoMadeIt(unittest.TestCase):
         _, _, out = run_collect(h)
         self.assertEqual(os.stat(os.path.join(out, "typed.txt")).st_mode & 0o777, 0o600)
 
+    def test_own_skill_committed_with_an_old_address_stays_own(self):
+        """~/.claude のリポジトリに入れた自作スキルは、昔のアドレスで書いていても自作（アドレスを変えた人）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("old-mine")
+        h.git_commit_claude()  # 作者 t@example.invalid
+        subprocess.run(["git", "config", "user.email", "new-address@example.invalid"], cwd=h.claude, check=True)
+        h.finish_plugins()
+        c, _, _ = run_collect(h)
+        self.assertEqual(skill(c, "old-mine")["kind"], "own")
+
     def test_my_own_repo_linked_in_stays_own(self):
         h = self.home()
         h.add_collection("dotfiles", ["mine"], author="t@example.invalid")  # 自分の作を symlink で入れた
@@ -338,6 +351,42 @@ class WhoMadeIt(unittest.TestCase):
         c, _, _ = run_collect(h)
         self.assertNotIn("ai-company:ai-company", [s["id"] for s in c["skills"]])
         self.assertEqual(c["stats"]["unmatched_calls"], 0)
+
+
+class Managers(unittest.TestCase):
+    """まとめ役: 手順書にサブエージェントを使うと書いてあり、記録でも呼ばれるたびに平均1回以上ほかに頼んでいるスキル。"""
+
+    def run_with(self, text, agent_calls_per_run, runs=2):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("boss", text)
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        lines = []
+        for r in range(runs):
+            d = TODAY - timedelta(days=r)
+            lines.append(h.user_line(d, "調べものをまとめてお願いします", cwd, hh=9))
+            lines.append(h.tool_use_line(d, "Skill", {"skill": "boss"}, cwd, hh=10))
+            for _ in range(agent_calls_per_run):
+                lines.append(h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=11))
+            lines.append(h.user_line(d, "ありがとう、次は別の話です", cwd, hh=12))
+            lines.append(h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=13))  # 人が打ったあとは数えない
+        h.write_session("-w", lines)
+        c, _, _ = run_collect(h)
+        return skill(c, "boss")["manager"]
+
+    def test_skill_that_hands_out_work_is_a_manager(self):
+        self.assertTrue(self.run_with("調べものを3つに分けてサブエージェントに頼み、結果をまとめる", 3))
+
+    def test_text_alone_is_not_enough(self):
+        self.assertFalse(self.run_with("必要ならサブエージェントを使う", 0))
+
+    def test_behavior_alone_is_not_enough(self):
+        self.assertFalse(self.run_with("請求書を作る", 3))
+
+    def test_one_run_is_not_enough(self):
+        self.assertFalse(self.run_with("サブエージェントに頼む", 3, runs=1))
 
 
 class ProjectSkills(unittest.TestCase):

@@ -166,7 +166,12 @@ def skill_lock_source(real_dir):
     return None
 
 
-def others_work(md, public_repos):
+def repo_top(directory):
+    out = git(["rev-parse", "--show-toplevel"], directory, timeout=5)
+    return os.path.realpath(out.strip()) if out and out.strip() else None
+
+
+def others_work(md, public_repos, root=None):
     """SKILL.md の実体が他人の作か。git の作者に自分（user.email）がいなければ他人の作。
 
     gstack などのスキル集は ~/.claude/skills に symlink や別の git リポジトリで入るので、
@@ -180,6 +185,11 @@ def others_work(md, public_repos):
         src = str(lock.get("source") or "").lower()
         return {"public": lock.get("sourceType") == "github" and src in public_repos,
                 "installed": parse_date(lock.get("installedAt"))}
+    # スキルの置き場所と同じリポジトリに入っているものは、本人が自分の持ち物として管理しているので自作。
+    # 作者のアドレスでは比べない（アドレスを変えた人の昔のスキルが他人の作になった。2026-10-21）
+    top = repo_top(real_dir)
+    if top and root and top == repo_top(root):
+        return None
     authors = git(["log", "--format=%ae", "--", os.path.basename(real)], real_dir)
     if not authors or not authors.strip():
         return None
@@ -213,6 +223,14 @@ def entry_birth(path):
     return datetime.fromtimestamp(ts, timezone.utc).date()
 
 
+DELEGATE_RE = re.compile(r"(subagent|サブエージェント|Agent\s*ツール|Agent tool|Task tool|subagent_type|Skill\s*ツール|Skill tool)", re.I)
+
+
+def mentions_delegation(text):
+    """手順書に、サブエージェントやほかのスキルを使う書き方があるか（まとめ役の見分けの片方）。"""
+    return bool(DELEGATE_RE.search(text or ""))
+
+
 def discover_skill_dir(root, today, public_repos):
     """root（…/.claude/skills）の中のスキル。他人の作は kind=external。
 
@@ -229,10 +247,11 @@ def discover_skill_dir(root, today, public_repos):
             continue
         try:
             with open(md, encoding="utf-8", errors="replace") as f:
-                fm = parse_frontmatter(f.read(20000))
+                body = f.read(200000)
         except OSError:
-            fm = {}
-        ext = others_work(md, public_repos)
+            body = ""
+        fm = parse_frontmatter(body[:20000])
+        ext = others_work(md, public_repos, root)
         if ext:
             material = valid_date(ext["installed"], today) or valid_date(entry_birth(d), today)
         else:
@@ -242,6 +261,7 @@ def discover_skill_dir(root, today, public_repos):
             "public": bool(ext and ext["public"]),
             "plugin": None, "description": fm.get("description", ""),
             "material_date": material.isoformat() if material else None,
+            "delegates_in_text": mentions_delegation(body),
         })
     return skills
 
@@ -326,13 +346,15 @@ def discover_plugin_skills(claude_dir, today, vocab):
             entry = os.path.basename(os.path.dirname(md))
             try:
                 with open(md, encoding="utf-8", errors="replace") as f:
-                    fm = parse_frontmatter(f.read(20000))
+                    body = f.read(200000)
             except OSError:
-                fm = {}
+                body = ""
+            fm = parse_frontmatter(body[:20000])
             skills.append({
                 "id": "%s:%s" % (plugin, fm.get("name") or entry), "alias": entry, "kind": "plugin",
                 "public": public, "plugin": plugin, "description": fm.get("description", ""),
                 "material_date": installed_at.isoformat() if installed_at else None,
+                "delegates_in_text": mentions_delegation(body),
             })
     return skills, plugin_info
 
@@ -410,9 +432,11 @@ def read_transcripts(claude_dir, today, log=eprint):
         "calls": [],     # (date, kind, name)  kind: skill | slash | agent
         "typed": [],     # (date, ts, text)
         "cwds": set(),
+        "delegations": {},  # 呼ばれたスキルの名前 -> そのあと人が打つまでに頼んだ回数
     }
     seen = set()
     for i, path in enumerate(files):
+        active = None  # いま動いているスキル（人が打つと終わる）
         try:
             fh = open(path, encoding="utf-8", errors="replace")
         except OSError:
@@ -473,8 +497,14 @@ def read_transcripts(claude_dir, today, log=eprint):
                         inp = b.get("input") or {}
                         if b.get("name") == "Skill" and isinstance(inp.get("skill"), str):
                             res["calls"].append((day, "skill", inp["skill"]))
+                            if active is None:
+                                active = inp["skill"]
+                            elif active != inp["skill"]:
+                                res["delegations"][active] = res["delegations"].get(active, 0) + 1
                         elif b.get("name") in ("Agent", "Task"):
                             res["calls"].append((day, "agent", inp.get("subagent_type") or "general-purpose"))
+                            if active is not None:
+                                res["delegations"][active] = res["delegations"].get(active, 0) + 1
                     continue
                 uid = d.get("uuid")
                 if uid:
@@ -484,8 +514,11 @@ def read_transcripts(claude_dir, today, log=eprint):
                 cmd = slash_command(d)
                 if cmd:
                     res["calls"].append((day, "slash", cmd))
+                    active = cmd
                     continue
                 text = human_text(d)
+                if text is not None:
+                    active = None
                 if text is not None and day >= win_start:
                     t = clean_typed(text)
                     if len(t) >= TYPED_MIN_CHARS:
@@ -640,6 +673,18 @@ def is_builtin_skill(name, vocab):
     return name in vocab["builtin_skills"] or name.startswith(tuple(vocab["builtin_skill_prefixes"]))
 
 
+MANAGER_MIN_RUNS = 2
+
+
+def is_manager(skill, runs, delegations):
+    """まとめ役（ほかのスキルやサブエージェントに仕事を割り振るスキル）か。
+
+    手順書の書き方だけでも、会話の記録だけでも外れが多い（前置きに「サブエージェント」と書くスキル集、
+    参照用のスキルを読んだあとの作業）ので、両方がそろったときだけ。記録では、呼ばれるたびに平均1回以上頼んでいること。
+    """
+    return bool(skill.get("delegates_in_text")) and runs >= MANAGER_MIN_RUNS and delegations >= runs
+
+
 def resolve_skill(name, by_id, by_bare):
     if name in by_id:
         return by_id[name]
@@ -706,6 +751,12 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
         for sid, v in (r.get("employees") or {}).items():
             hist_emp[sid] = v
 
+    deleg = {}
+    for name, n in tr["delegations"].items():
+        s = resolve_skill(name, by_id, by_bare)
+        if s is not None:
+            deleg[s["id"]] = deleg.get(s["id"], 0) + n
+
     roster = []
     for s in skills:
         st = stats[s["id"]]
@@ -722,6 +773,7 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
             "first_used": st["first"].isoformat() if st["first"] else None,
             "last_used": last.isoformat() if last else None,
             "count_30d": st["n30"], "count_total": st["total"],
+            "manager": is_manager(s, st["total"], deleg.get(s["id"], 0)),
         })
 
     agent_list = []
