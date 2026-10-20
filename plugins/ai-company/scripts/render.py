@@ -1043,13 +1043,24 @@ def main(argv=None):
     if not company.get("today"):
         print("STATUS: error\ncompany.json を読めません。先に collect.py を実行してください", file=sys.stderr)
         return 2
+    remove_typed(args.work_dir)  # 途中で止まっても打った文を残さない
     misplaced = os.path.join(args.work_dir, "org.json")
-    if not args.org and not os.path.exists(org_path) and os.path.exists(misplaced):
+    if not args.org and os.path.isfile(misplaced) and os.path.realpath(misplaced) != os.path.realpath(org_path):
         # 手順3で work/ に書かれた org.json を黙って無視しない（2026-10-21 試しで会社名が消えた）
-        print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
-        os.replace(misplaced, org_path)
-    elif os.path.exists(misplaced):
-        print("注意: %s は読みません。会社名などは %s に書いてください" % (misplaced, org_path))
+        if os.path.exists(org_path) and os.path.getmtime(misplaced) >= os.path.getmtime(org_path):
+            print("STATUS: error\norg.json が2か所にあり、%s のほうが新しくなっています。手順3の結果を %s に混ぜて書き直し、"
+                  "%s を消してから、もう一度実行してください" % (misplaced, org_path, misplaced))
+            return 2
+        if not os.path.exists(org_path):
+            try:
+                os.replace(misplaced, org_path)
+            except OSError as e:
+                print("STATUS: error\norg.json を %s から %s に移せませんでした（%s）。手で移してから、もう一度実行してください"
+                      % (misplaced, org_path, e.strerror or e))
+                return 2
+            print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
+        else:
+            print("注意: %s は古いので読みません。会社名などは %s に書いてください" % (misplaced, org_path))
     org = normalize_org(load_json(org_path, {}), company, vocab, warn=lambda s: print("注意: " + s))
     rows = read_history(hist_path)
 
@@ -1058,7 +1069,6 @@ def main(argv=None):
     if os.path.exists(share_path):
         os.remove(share_path)  # 前回の分は最初に消す（R2-8）
 
-    remove_typed(args.work_dir)
     m = build_model(company, org, vocab, rows)
     write_atomic(portal_path, build_html(m, "local"))
     print("手元の版: %s" % portal_path)
@@ -1095,7 +1105,7 @@ def main(argv=None):
         named = sorted({t for _, t, _ in hits if t.lower() in (org.get("company_name") or "").lower()})
         if named:
             print("ヒント: %s はあなたが付けた会社名にも入っています。手元の%sと同じ綴りのため止まりました。"
-                  "会社名として出してよければ --resolve allow、隠したければ会社名を変えるか --resolve mask"
+                  "その語が取引先や案件の名前なら、会社名を変えるか --resolve mask。本人が出してよいと言ったときだけ --resolve allow"
                   % (" / ".join(named), "・".join(sorted({k for k, t, _ in hits if t in named}))))
         print("share.html は書いていません。続け方: --resolve mask（伏せ字にして作り直す）／--resolve allow（この語を許可する）／やめる")
         write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))

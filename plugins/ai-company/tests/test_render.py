@@ -354,6 +354,27 @@ class OrgPlace(unittest.TestCase):
         self.assertIn("[会社名] エーワン研究所", out)
 
 
+class OrgPlaceMore(unittest.TestCase):
+    def test_newer_org_in_work_folder_stops(self):
+        """2回目以降に work/ にまた書かれたら、古いほうで作り続けず止まる（レビューの指摘）。"""
+        env = Env(self, "small")
+        p = os.path.join(env.work, "org.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"company_name": "新しい名前", "people": {}}, f, ensure_ascii=False)
+        os.utime(p, (os.path.getmtime(os.path.join(env.out, "org.json")) + 10,) * 2)
+        rc, out = env.run_raw()
+        self.assertEqual(rc, 2)
+        self.assertIn("STATUS: error", out)
+        self.assertFalse(os.path.exists(os.path.join(env.work, "typed.txt")))  # 止まっても打った文は残さない
+
+    def test_folder_named_org_json_is_not_moved(self):
+        env = Env(self, "small")
+        os.makedirs(os.path.join(env.work, "org.json"))
+        rc, out = env.run()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.isfile(os.path.join(env.out, "org.json")))
+
+
 class Jobs(unittest.TestCase):
     def model(self, jobs, total, sample, extra=None):
         company = {"today": "2026-10-08", "founded": "2026-06-01", "range": {"oldest": "2026-08-08", "newest": "2026-10-08"},

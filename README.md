@@ -28,7 +28,7 @@ Claude Code の言葉を、会社の役割に置き換えています。
 <details><summary>数え方の細かい決まり</summary>
 
 - 数えるのは `~/.claude/skills`、会話の記録に残っている作業フォルダ（とその上）の `.claude/skills`、プラグインのスキル。このプラグイン自身は数えません
-  - 自作か他人の作かは、SKILL.md の実体（symlink の先）の git の作者にあなた（`user.email`）がいるか、`npx skills` の記録（`.skill-lock.json`・`skills-lock.json`）にあるかで見分けます。他人の作を自分のリポジトリにコピーしてコミットしたものは、自作に数えます
+  - 自作か他人の作かは、`~/.claude` ごと git で管理していれば、その中にあるものは自作。それ以外は SKILL.md の実体（symlink の先）の git の作者にあなた（`user.email`）がいるか、`npx skills` の記録（`.skill-lock.json`・`skills-lock.json`）にあるかで見分けます。他人の作を自分のリポジトリにコピーしてコミットしたものは、自作に数えます
 
 </details>
 

@@ -67,6 +67,16 @@ def parse_date(s):
         return None
 
 
+def local_day(ts):
+    """会話の記録の時刻（UTC の ISO 形式）を、手元の時刻帯の日付にする。読めなければ None。"""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date()
+    except ValueError:
+        return parse_date(ts)
+
+
 def valid_date(d, today):
     return d if d and EARLIEST_VALID <= d <= today else None
 
@@ -121,7 +131,7 @@ def file_birth(path):
     except OSError:
         return None
     ts = getattr(st, "st_birthtime", None) or min(st.st_mtime, st.st_ctime)
-    return datetime.fromtimestamp(ts, timezone.utc).date()
+    return datetime.fromtimestamp(ts).date()  # 手元の時刻帯
 
 
 def first_commit_date(directory):
@@ -171,7 +181,7 @@ def repo_top(directory):
     return os.path.realpath(out.strip()) if out and out.strip() else None
 
 
-def others_work(md, public_repos, root=None):
+def others_work(md, public_repos, home_repo=None, my_emails=frozenset()):
     """SKILL.md の実体が他人の作か。git の作者に自分（user.email）がいなければ他人の作。
 
     gstack などのスキル集は ~/.claude/skills に symlink や別の git リポジトリで入るので、
@@ -185,15 +195,16 @@ def others_work(md, public_repos, root=None):
         src = str(lock.get("source") or "").lower()
         return {"public": lock.get("sourceType") == "github" and src in public_repos,
                 "installed": parse_date(lock.get("installedAt"))}
-    # スキルの置き場所と同じリポジトリに入っているものは、本人が自分の持ち物として管理しているので自作。
-    # 作者のアドレスでは比べない（アドレスを変えた人の昔のスキルが他人の作になった。2026-10-21）
-    top = repo_top(real_dir)
-    if top and root and top == repo_top(root):
+    # ~/.claude ごと git で管理している人の ~/.claude/skills の中身は、本人の持ち物として自作。
+    # 作者のアドレスでは比べない（アドレスを変えた人の昔のスキルが他人の作になった。2026-10-21）。
+    # プロジェクトの .claude/skills や、置き場所そのものに clone したスキル集には当てない（人のリポジトリかもしれない）
+    if home_repo and repo_top(real_dir) == home_repo:
         return None
     authors = git(["log", "--format=%ae", "--", os.path.basename(real)], real_dir)
     if not authors or not authors.strip():
         return None
     me = {e.strip().lower() for e in (git(["config", "--get-all", "user.email"], real_dir) or "").split("\n") if e.strip()}
+    me |= my_emails
     if not me or me & {a.strip().lower() for a in authors.split("\n")}:
         return None  # 自分の名前が分からなければ自作のまま（伏せる側に倒す）
     origin = (git(["remote", "get-url", "origin"], real_dir, timeout=5) or "").strip()
@@ -220,7 +231,7 @@ def entry_birth(path):
     except OSError:
         return None
     ts = getattr(st, "st_birthtime", None) or min(st.st_mtime, st.st_ctime)
-    return datetime.fromtimestamp(ts, timezone.utc).date()
+    return datetime.fromtimestamp(ts).date()  # 手元の時刻帯
 
 
 DELEGATE_RE = re.compile(r"(subagent|サブエージェント|Agent\s*ツール|Agent tool|Task tool|subagent_type|Skill\s*ツール|Skill tool)", re.I)
@@ -231,7 +242,24 @@ def mentions_delegation(text):
     return bool(DELEGATE_RE.search(text or ""))
 
 
-def discover_skill_dir(root, today, public_repos):
+def home_config_repo(root):
+    """~/.claude/skills が、その上（~/.claude かそれより上）を一番上とする git リポジトリに入っていれば、その一番上。"""
+    top = repo_top(root)
+    real_root = os.path.realpath(root)
+    return top if top and top != real_root and real_root.startswith(top + os.sep) else None
+
+
+def my_past_emails(claude_dir):
+    """~/.claude を git で管理していれば、そこで本人がコミットに使ってきたアドレス（アドレスを変えた人の昔のスキルのため）。"""
+    root = os.path.join(claude_dir, "skills")
+    repo = home_config_repo(root) if os.path.isdir(root) else None
+    if not repo:
+        return frozenset()
+    out = git(["log", "-n", "2000", "--format=%ae"], repo) or ""
+    return frozenset(e.strip().lower() for e in out.split("\n") if e.strip())
+
+
+def discover_skill_dir(root, today, public_repos, user_level=False, my_emails=frozenset()):
     """root（…/.claude/skills）の中のスキル。他人の作は kind=external。
 
     公開扱い（実名を外に出す版に載せてよい）にするのは、配布元が vocab.json の公開の一覧にあるものだけ。
@@ -240,6 +268,7 @@ def discover_skill_dir(root, today, public_repos):
     skills = []
     if not os.path.isdir(root):
         return skills
+    home_repo = home_config_repo(root) if user_level else None
     for entry in sorted(os.listdir(root)):
         d = os.path.join(root, entry)
         md = os.path.join(d, "SKILL.md")
@@ -251,7 +280,7 @@ def discover_skill_dir(root, today, public_repos):
         except OSError:
             body = ""
         fm = parse_frontmatter(body[:20000])
-        ext = others_work(md, public_repos, root)
+        ext = others_work(md, public_repos, home_repo, my_emails)
         if ext:
             material = valid_date(ext["installed"], today) or valid_date(entry_birth(d), today)
         else:
@@ -267,7 +296,7 @@ def discover_skill_dir(root, today, public_repos):
 
 
 def discover_own_skills(claude_dir, today, vocab):
-    return discover_skill_dir(os.path.join(claude_dir, "skills"), today, known_public_repos(vocab))
+    return discover_skill_dir(os.path.join(claude_dir, "skills"), today, known_public_repos(vocab), user_level=True)
 
 
 def is_user_config(dot_claude):
@@ -303,7 +332,7 @@ def project_skill_roots(cwds, claude_dir):
 def discover_project_skills(cwds, claude_dir, today, vocab):
     skills = []
     for root in project_skill_roots(cwds, claude_dir):
-        skills.extend(discover_skill_dir(root, today, known_public_repos(vocab)))
+        skills.extend(discover_skill_dir(root, today, known_public_repos(vocab), my_emails=my_past_emails(claude_dir)))
     return skills
 
 
@@ -397,6 +426,21 @@ def human_text(d):
     return content
 
 
+def is_turn_start(d):
+    """人が何か送った行か（区切り）。human_text より広く、画像つき・origin の無い古い形・VS Code からの文も含む。"""
+    if d.get("type") != "user" or d.get("isSidechain") or d.get("isMeta") or d.get("toolUseResult"):
+        return False
+    if d.get("isCompactSummary") or d.get("entrypoint") == "sdk-cli":
+        return False
+    msg = d.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False
+        content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return isinstance(content, str) and not content.lstrip().startswith(NON_HUMAN_PREFIXES)
+
+
 def slash_command(d):
     """利用者が打った /名前 なら名前。"""
     if d.get("type") != "user" or d.get("isSidechain") or d.get("isMeta"):
@@ -475,7 +519,7 @@ def read_transcripts(claude_dir, today, log=eprint):
                 if not isinstance(d, dict) or "type" not in d or "message" not in d:
                     continue
                 ts = d.get("timestamp")
-                day = parse_date(ts)
+                day = local_day(ts)
                 if day is None:
                     continue
                 cwd = d.get("cwd")
@@ -497,10 +541,10 @@ def read_transcripts(claude_dir, today, log=eprint):
                         inp = b.get("input") or {}
                         if b.get("name") == "Skill" and isinstance(inp.get("skill"), str):
                             res["calls"].append((day, "skill", inp["skill"]))
-                            if active is None:
-                                active = inp["skill"]
-                            elif active != inp["skill"]:
+                            if active is not None and active != inp["skill"]:
+                                # 動いているスキルが別のスキルを呼んだ: 頼み1回。そのあとの頼みは呼ばれた側に付ける
                                 res["delegations"][active] = res["delegations"].get(active, 0) + 1
+                            active = inp["skill"]
                         elif b.get("name") in ("Agent", "Task"):
                             res["calls"].append((day, "agent", inp.get("subagent_type") or "general-purpose"))
                             if active is not None:
@@ -517,7 +561,7 @@ def read_transcripts(claude_dir, today, log=eprint):
                     active = cmd
                     continue
                 text = human_text(d)
-                if text is not None:
+                if text is not None or is_turn_start(d):
                     active = None
                 if text is not None and day >= win_start:
                     t = clean_typed(text)
@@ -622,7 +666,7 @@ def path_tokens(path, generic):
         if not part or part.startswith("."):
             continue
         for cand in [part] + re.split(r"[-_.\s]+", part):
-            if len(cand) >= 4 and cand.lower() not in generic and not cand.isdigit():
+            if len(cand) >= 4 and cand.lower() not in generic and not re.fullmatch(r"[\d\-_.:/]+", cand):
                 out.add(cand)
     return out
 
