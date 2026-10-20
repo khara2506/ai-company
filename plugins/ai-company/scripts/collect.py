@@ -250,6 +250,15 @@ def discover_own_skills(claude_dir, today, vocab):
     return discover_skill_dir(os.path.join(claude_dir, "skills"), today, known_public_repos(vocab))
 
 
+def is_user_config(dot_claude):
+    """ホームの ~/.claude（会話の記録 projects/ がある）か。プロジェクトの .claude には projects/ が無い。
+
+    --claude-dir で別の場所を読んでいるとき、さかのぼった先の本物の ~/.claude/skills を
+    プロジェクトのスキルとして数えないため。
+    """
+    return os.path.isdir(os.path.join(dot_claude, "projects"))
+
+
 def project_skill_roots(cwds, claude_dir):
     """作業したフォルダとその上にある .claude/skills（Claude Code がプロジェクトのスキルとして読む場所）。"""
     user_root = os.path.realpath(os.path.join(claude_dir, "skills"))
@@ -258,7 +267,8 @@ def project_skill_roots(cwds, claude_dir):
         d = c
         while d and os.path.isabs(d):
             cand = os.path.join(d, ".claude", "skills")
-            if os.path.isdir(cand) and os.sep + os.path.join(".claude", "worktrees") + os.sep not in cand:
+            if (os.path.isdir(cand) and os.sep + os.path.join(".claude", "worktrees") + os.sep not in cand
+                    and not is_user_config(os.path.dirname(cand))):
                 real = os.path.realpath(cand)
                 if real not in seen:
                     seen.add(real)

@@ -392,6 +392,23 @@ class ProjectSkills(unittest.TestCase):
         c, _, _ = run_collect(h)
         self.assertEqual(c["skills"], [])  # 作業用の写し（git worktree）は本体と同じなので数えない
 
+    def test_another_home_above_the_work_folder_is_not_a_project(self):
+        """作業フォルダの上に別のホームの ~/.claude（projects/ がある）があっても、そのスキルは数えない。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outer = os.path.join(tmp.name, ".claude")
+        os.makedirs(os.path.join(outer, "projects"))
+        d = os.path.join(outer, "skills", "outer-skill")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: outer-skill\n---\n")
+        h = fakes.FakeHome(os.path.join(tmp.name, "inner"))
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        h.write_session("-w", [h.user_line(TODAY, "このフォルダで作業します", cwd)])
+        c, _, _ = run_collect(h)
+        self.assertEqual(c["skills"], [])
+
     def test_folder_never_worked_in_is_not_read(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
