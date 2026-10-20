@@ -29,6 +29,7 @@ SKILL_DOC_URL = "https://code.claude.com/docs/en/skills"
 DEFAULT_COMPANY = "わたしの AI 会社"
 WINDOW_DAYS = 30
 JOB_MIN = 5
+SMALL_SAMPLE = 30  # 抜き出しがこれより少ないときは全件へ引き伸ばさない（少ない材料からの推定は外れやすい）
 JOB_MAX = 3
 MAX_DEPTS = 7
 ROSTER_LIMIT = 10
@@ -173,7 +174,8 @@ def build_model(company, org, vocab, history_rows=None):
         emps.append({"id": s["id"], "kind": s["kind"], "public": s["public"], "dept": dept,
                      "title": title, "local": s["id"], "share": share, "joined": j, "last_used": lu,
                      "n30": s.get("count_30d", 0), "total": s.get("count_total", 0), "status": status,
-                     "real_allowed": bool(people.get(s["id"], {}).get("real_name_allowed"))})
+                     "real_allowed": bool(people.get(s["id"], {}).get("real_name_allowed")),
+                     "manager": bool(s.get("manager"))})
     retired = []
     for s in company.get("retired", []):
         dept, title, share = person(s["id"], False)
@@ -210,14 +212,17 @@ def build_model(company, org, vocab, history_rows=None):
     typed = company.get("typed", {})
     total, sample_n = typed.get("total_30d", 0), typed.get("sample_n", 0)
     sampled = total > sample_n > 0
+    small = sampled and sample_n < SMALL_SAMPLE
+    prefix = "少なくとも" if small else ("約" if sampled else "")
     jobs = []
     for j in org["jobs"]:
         if j["covered"] or j["work"] == vocab["other_work"]["id"] or sample_n <= 0:
             continue
-        est = round(j["count"] * total / sample_n) if sampled else j["count"]
+        est = round(j["count"] * total / sample_n) if sampled and not small else j["count"]
         if est >= JOB_MIN:
             w = works[j["work"]]
-            jobs.append({"work": w["name"], "dept": depts[w["dept"]]["title"], "est": est, "sampled": sampled})
+            jobs.append({"work": w["name"], "dept": depts[w["dept"]]["title"], "est": est, "sampled": sampled,
+                         "prefix": prefix})
     jobs.sort(key=lambda x: (-x["est"], x["work"]))
     jobs = jobs[:JOB_MAX]
 
@@ -237,7 +242,7 @@ def build_model(company, org, vocab, history_rows=None):
         "retention_days": company.get("retention_days"),
         "emps": emps, "retired": retired, "dept_rows": dept_rows, "dept_name": dept_name,
         "top": top, "new_hires": new_hires, "agents": agents, "jobs": jobs,
-        "typed_found": bool(typed.get("found")), "sampled": sampled,
+        "typed_found": bool(typed.get("found")), "sampled": sampled, "small_sample": small,
         "timeline": build_timeline(emps, retired, founded, today, rows, dept_name),
         "has_typed_data": has_records and bool(typed.get("found")),
     }
@@ -336,6 +341,24 @@ def fit(s, size, max_w):
 
 # ---------------------------------------------------------------- 画像（SVG）
 
+HIRE_LABEL = {"own": "自作", "external": "中途入社（スキル集）", "plugin": "中途入社（プラグイン）"}
+
+# この会社の見方（会社の言葉, Claude Code では）。固定の文なので外に出す版にも載せてよい
+GLOSSARY = [
+    ("代表（あなた）", "Claude に仕事を頼む人"),
+    ("社員", "自分で作ったスキル。決まった仕事の手順を覚えた担当（例: 請求書づくり）"),
+    ("まとめ役", "ほかのスキルやサブエージェントに仕事を割り振るスキル（例: 調べものを手分けして頼み、結果をまとめる）"),
+    ("中途入社", "他の人が作ったスキル集やプラグインから入ったスキル"),
+    ("外部スタッフ", "サブエージェントと、Claude Code に最初から入っているスキル。社員数には入れない"),
+    ("求人", "手で何度も頼んでいるのに、担当するスキルがいない仕事"),
+]
+
+
+def headcount(emps):
+    own = sum(1 for e in emps if e["kind"] == "own")
+    return own, len(emps) - own, sum(1 for e in emps if e.get("manager"))
+
+
 def alt_text(m, mode):
     name = m["name"]
     if not m["emps"]:
@@ -348,7 +371,7 @@ def alt_text(m, mode):
     if m["jobs"]:
         j = m["jobs"][0]
         parts.append("求人は%s、%s（この30日で%s%d回、手で対応）" % (
-            j["dept"], j["work"], "約" if j["sampled"] else "", j["est"]))
+            j["dept"], j["work"], j["prefix"], j["est"]))
     return "。".join(parts) + "。"
 
 
@@ -408,7 +431,7 @@ def build_svg(m, mode="share"):
             '<tspan font-size="116" fill="%s">%d</tspan><tspan font-size="56" fill="%s"> 名</tspan></text>'
             % (M, base, C["primary"], C["muted"], C["primary"], len(m["emps"]), C["text"]))
         seal(W - M - 66, base - 44, 66, "在籍")
-        txt(M, base + 58, "この30日の新入社員 %d名" % len(m["new_hires"]), 36, C["muted"])
+        txt(M, base + 58, "うち自作 %d名 ／ この30日の入社 %d名" % (headcount(m["emps"])[0], len(m["new_hires"])), 36, C["muted"])
         y = base + 80
         rule(y)
         y += 36
@@ -442,7 +465,7 @@ def build_svg(m, mode="share"):
         txt(M + 28, top + 44, "求人", 26, C["faint"])
         title = fit("%s　%s" % (j["dept"], j["work"]), 40, cw - 56 - 150)
         txt(M + 28, top + 94, title, 40, C["text"], 700)
-        txt(M + 28, top + 134, "この30日で%s%d回、手で対応" % ("約" if j["sampled"] else "", j["est"]), 30, C["muted"])
+        txt(M + 28, top + 134, "この30日で%s%d回、手で対応" % (j["prefix"], j["est"]), 30, C["muted"])
         seal(W - M - 66, top + 70, 44, "募集")
         y = top + box_h
     y = max(y + 46, H - 112)  # 末尾の表記は下端にそろえる（中身が少ないときに下が空かない）
@@ -500,6 +523,13 @@ details[open]>summary::after{content:"⌄"}
 ul.plain{list-style:none;margin:0;padding:0 0 8px 0}
 ul.plain li{padding:6px 0;border-top:1px solid var(--rule)}
 .meta{color:var(--muted);font-size:13px}
+.idcard summary{flex-wrap:wrap;column-gap:12px;row-gap:0;padding:6px 0}
+.idcard .meta{order:3;flex-basis:100%}
+details.glossary{border:0;margin:0 0 12px}
+details.glossary>summary{color:var(--primary);font-weight:700}
+details.glossary dl{margin:0 0 8px;padding:8px 16px;background:var(--sheet);border-left:4px solid var(--rule-strong)}
+details.glossary dt{font-weight:700;margin-top:8px}
+details.glossary dd{margin:0;color:var(--muted);font-size:14px;line-height:1.6}
 .idcard{border:0;border-bottom:1px solid var(--rule)}
 .idcard .body{background:var(--sheet);border:1px solid var(--rule-strong);border-radius:12px;padding:12px 16px;margin:4px 0 12px;box-shadow:0 8px 24px -12px rgba(0,0,0,.25)}
 .idcard .body .head{font-size:12px;color:var(--faint);border-bottom:1px solid var(--rule-strong);padding-bottom:4px;margin-bottom:8px}
@@ -590,7 +620,7 @@ def job_prompt(j):
     return ("「%s」を、ふだん手で何度も頼んでいます（この30日で%s%d回）。"
             "この作業を自動でやってくれる Claude Code のスキルを作ってください。"
             "最初に、いつもどう頼んでいるかを私に聞いてから、SKILL.md の案を出してください。"
-            % (j["work"], "約" if j["sampled"] else "", j["est"]))
+            % (j["work"], j["prefix"], j["est"]))
 
 
 EMPTY_PROMPT = ("Claude Code で毎回手で頼んでいる作業を1つ選んで、それを自動でやってくれるスキルを作ってください。"
@@ -621,9 +651,15 @@ def build_html(m, mode, svg=None):
     sec_open("overview", "会社概要")
     if not share:
         w('<div class="notice" role="note"><b>注意</b>この版は実名入りです。人に送らないでください（共有用は share.html）。</div>')
-    facts = [("社員", "%d名" % len(emps)), ("部署", "%d" % len(m["dept_rows"])),
-             ("外部スタッフ", "%d" % len(m["agents"])), ("創業", d2s(m["founded"])), ("期", "第%d期" % m["period"])]
+    own_n, hired_n, mgr_n = headcount(emps)
+    staff = "%d名（自作 %d・中途入社 %d）" % (len(emps), own_n, hired_n) if emps else "0名"
+    facts = [("社員", staff), ("部署", "%d" % len(m["dept_rows"]))]
+    if mgr_n:
+        facts.append(("まとめ役", "%d名" % mgr_n))
+    facts += [("外部スタッフ", "%d" % len(m["agents"])), ("創業", d2s(m["founded"])), ("期", "第%d期" % m["period"])]
     w('<dl class="facts">%s</dl>' % "".join("<dt>%s</dt><dd>%s</dd>" % (esc(k), esc(v)) for k, v in facts))
+    w('<details class="glossary"><summary>この会社の見方（言葉の説明）</summary><dl>%s</dl></details>' % "".join(
+        "<dt>%s</dt><dd>%s</dd>" % (esc(k), esc(v)) for k, v in GLOSSARY))
     if emps:
         w('<p><span class="seal" aria-hidden="true">在籍</span></p>')
     if m["has_records"]:
@@ -667,11 +703,16 @@ def build_html(m, mode, svg=None):
         w('<h3>%s（%d名）</h3>' % (esc(dn), c))
 
         def card(e):
-            return ('<details class="idcard"><summary><span>%s</span><span class="meta">入社 %s ・ この30日 %d回</span></summary>'
+            hire = HIRE_LABEL.get(e["kind"], "自作")
+            meta = "%s%s %s ・ この30日 %d回" % ("まとめ役 ・ " if e.get("manager") else "", hire.split("（")[0],
+                                               d2s(e["joined"]) or "入社日不明", e["n30"])
+            role = ('<dt>役割</dt><dd>まとめ役（ほかの社員や外部スタッフに仕事を割り振る）</dd>' if e.get("manager") else "")
+            return ('<details class="idcard"><summary><span>%s</span><span class="meta">%s</span></summary>'
                     '<div class="body"><div class="head">AI 社員証</div><dl><dt>名前</dt><dd>%s</dd><dt>所属</dt><dd>%s</dd>'
+                    '<dt>採用</dt><dd>%s</dd>%s'
                     '<dt>入社日</dt><dd>%s</dd><dt>この30日</dt><dd>%d回</dd><dt>通算</dt><dd>%d回</dd><dt>状態</dt><dd>%s</dd></dl></div></details>'
-                    % (esc(person_label(e, mode)), esc(d2s(e["joined"]) or "不明"), e["n30"],
-                       esc(person_label(e, mode)), esc(m["dept_name"].get(did, dn)), esc(d2s(e["joined"]) or "不明"),
+                    % (esc(person_label(e, mode)), esc(meta),
+                       esc(person_label(e, mode)), esc(m["dept_name"].get(did, dn)), esc(hire), role, esc(d2s(e["joined"]) or "不明"),
                        e["n30"], e["total"], esc(e["status"])))
         w("".join(card(e) for e in members[:ROSTER_LIMIT]))
         if len(members) > ROSTER_LIMIT:
@@ -728,14 +769,16 @@ def build_html(m, mode, svg=None):
     elif not m["jobs"]:
         w('<div class="empty"><p>今は求人はありません。手で頼んでいる作業で、この30日に%d回以上のものは見つかりませんでした。</p></div>' % JOB_MIN)
     else:
-        if m["sampled"]:
+        if m["small_sample"]:
+            w('<p class="small">人が打った文が少ないため、抜き出しの中で数えた回数です（実際はもっと多いことがあります）。</p>')
+        elif m["sampled"]:
             w('<p class="small">人が打った文の抜き出し（最大300件）からの推定です。</p>')
         for i, j in enumerate(m["jobs"]):
             w('<div class="job"><h3>求人：%s</h3><p class="kv">仕事の内容：%s</p><p class="kv">この30日で%s%d回、手で対応</p>'
               '<p class="small">いちばん大事なこと：この作業をスキルにする</p>'
               '<p class="prompt" id="jp-%d">%s</p><div class="actions"><button class="primary" type="button" data-copy="jp-%d">依頼文をコピー</button>'
               '<a class="btn" href="%s">スキルの作り方（公式）</a></div></div>' % (
-                  esc(j["dept"]), esc(j["work"]), "約" if j["sampled"] else "", j["est"], i, esc(job_prompt(j)), i, SKILL_DOC_URL))
+                  esc(j["dept"]), esc(j["work"]), j["prefix"], j["est"], i, esc(job_prompt(j)), i, SKILL_DOC_URL))
     w("</section></main>")
     w("<footer>")
     if share:
@@ -885,7 +928,7 @@ def share_strings(m):
     out.append(("実名にしたスキル", sorted({e["share"] for e in emps if not e["public"] and e["share"] != e["title"]})))
     out.append(("外部スタッフ", sorted({a["share"] for a in m["agents"]})))
     out.append(("部署名", [n for _, n, _ in m["dept_rows"]]))
-    out.append(("求人票", ["%s／%s（この30日で%s%d回）" % (j["dept"], j["work"], "約" if j["sampled"] else "", j["est"]) for j in m["jobs"]]))
+    out.append(("求人票", ["%s／%s（この30日で%s%d回）" % (j["dept"], j["work"], j["prefix"], j["est"]) for j in m["jobs"]]))
     return [(k, v) for k, v in out if v]
 
 
@@ -1000,6 +1043,24 @@ def main(argv=None):
     if not company.get("today"):
         print("STATUS: error\ncompany.json を読めません。先に collect.py を実行してください", file=sys.stderr)
         return 2
+    remove_typed(args.work_dir)  # 途中で止まっても打った文を残さない
+    misplaced = os.path.join(args.work_dir, "org.json")
+    if not args.org and os.path.isfile(misplaced) and os.path.realpath(misplaced) != os.path.realpath(org_path):
+        # 手順3で work/ に書かれた org.json を黙って無視しない（2026-10-21 試しで会社名が消えた）
+        if os.path.exists(org_path) and os.path.getmtime(misplaced) >= os.path.getmtime(org_path):
+            print("STATUS: error\norg.json が2か所にあり、%s のほうが新しくなっています。手順3の結果を %s に混ぜて書き直し、"
+                  "%s を消してから、もう一度実行してください" % (misplaced, org_path, misplaced))
+            return 2
+        if not os.path.exists(org_path):
+            try:
+                os.replace(misplaced, org_path)
+            except OSError as e:
+                print("STATUS: error\norg.json を %s から %s に移せませんでした（%s）。手で移してから、もう一度実行してください"
+                      % (misplaced, org_path, e.strerror or e))
+                return 2
+            print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
+        else:
+            print("注意: %s は古いので読みません。会社名などは %s に書いてください" % (misplaced, org_path))
     org = normalize_org(load_json(org_path, {}), company, vocab, warn=lambda s: print("注意: " + s))
     rows = read_history(hist_path)
 
@@ -1008,7 +1069,6 @@ def main(argv=None):
     if os.path.exists(share_path):
         os.remove(share_path)  # 前回の分は最初に消す（R2-8）
 
-    remove_typed(args.work_dir)
     m = build_model(company, org, vocab, rows)
     write_atomic(portal_path, build_html(m, "local"))
     print("手元の版: %s" % portal_path)
@@ -1042,6 +1102,11 @@ def main(argv=None):
         # 語と場所は端末にだけ出す。ファイルには書かない（R2-6）
         for kind, term, loc in hits:
             print("LEAK: 種類=%s 場所=%s 語=%s" % (kind, loc, term))
+        named = sorted({t for _, t, _ in hits if t.lower() in (org.get("company_name") or "").lower()})
+        if named:
+            print("ヒント: %s はあなたが付けた会社名にも入っています。手元の%sと同じ綴りのため止まりました。"
+                  "その語が取引先や案件の名前なら、会社名を変えるか --resolve mask。本人が出してよいと言ったときだけ --resolve allow"
+                  % (" / ".join(named), "・".join(sorted({k for k, t, _ in hits if t in named}))))
         print("share.html は書いていません。続け方: --resolve mask（伏せ字にして作り直す）／--resolve allow（この語を許可する）／やめる")
         write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
         print("STATUS: leak")

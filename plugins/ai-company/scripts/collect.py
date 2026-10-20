@@ -67,6 +67,16 @@ def parse_date(s):
         return None
 
 
+def local_day(ts):
+    """会話の記録の時刻（UTC の ISO 形式）を、手元の時刻帯の日付にする。読めなければ None。"""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date()
+    except ValueError:
+        return parse_date(ts)
+
+
 def valid_date(d, today):
     return d if d and EARLIEST_VALID <= d <= today else None
 
@@ -121,7 +131,7 @@ def file_birth(path):
     except OSError:
         return None
     ts = getattr(st, "st_birthtime", None) or min(st.st_mtime, st.st_ctime)
-    return datetime.fromtimestamp(ts, timezone.utc).date()
+    return datetime.fromtimestamp(ts).date()  # 手元の時刻帯
 
 
 def first_commit_date(directory):
@@ -166,7 +176,12 @@ def skill_lock_source(real_dir):
     return None
 
 
-def others_work(md, public_repos):
+def repo_top(directory):
+    out = git(["rev-parse", "--show-toplevel"], directory, timeout=5)
+    return os.path.realpath(out.strip()) if out and out.strip() else None
+
+
+def others_work(md, public_repos, home_repo=None, my_emails=frozenset()):
     """SKILL.md の実体が他人の作か。git の作者に自分（user.email）がいなければ他人の作。
 
     gstack などのスキル集は ~/.claude/skills に symlink や別の git リポジトリで入るので、
@@ -180,10 +195,16 @@ def others_work(md, public_repos):
         src = str(lock.get("source") or "").lower()
         return {"public": lock.get("sourceType") == "github" and src in public_repos,
                 "installed": parse_date(lock.get("installedAt"))}
+    # ~/.claude ごと git で管理している人の ~/.claude/skills の中身は、本人の持ち物として自作。
+    # 作者のアドレスでは比べない（アドレスを変えた人の昔のスキルが他人の作になった。2026-10-21）。
+    # プロジェクトの .claude/skills や、置き場所そのものに clone したスキル集には当てない（人のリポジトリかもしれない）
+    if home_repo and repo_top(real_dir) == home_repo:
+        return None
     authors = git(["log", "--format=%ae", "--", os.path.basename(real)], real_dir)
     if not authors or not authors.strip():
         return None
     me = {e.strip().lower() for e in (git(["config", "--get-all", "user.email"], real_dir) or "").split("\n") if e.strip()}
+    me |= my_emails
     if not me or me & {a.strip().lower() for a in authors.split("\n")}:
         return None  # 自分の名前が分からなければ自作のまま（伏せる側に倒す）
     origin = (git(["remote", "get-url", "origin"], real_dir, timeout=5) or "").strip()
@@ -210,10 +231,35 @@ def entry_birth(path):
     except OSError:
         return None
     ts = getattr(st, "st_birthtime", None) or min(st.st_mtime, st.st_ctime)
-    return datetime.fromtimestamp(ts, timezone.utc).date()
+    return datetime.fromtimestamp(ts).date()  # 手元の時刻帯
 
 
-def discover_skill_dir(root, today, public_repos):
+DELEGATE_RE = re.compile(r"(subagent|サブエージェント|Agent\s*ツール|Agent tool|Task tool|subagent_type|Skill\s*ツール|Skill tool)", re.I)
+
+
+def mentions_delegation(text):
+    """手順書に、サブエージェントやほかのスキルを使う書き方があるか（まとめ役の見分けの片方）。"""
+    return bool(DELEGATE_RE.search(text or ""))
+
+
+def home_config_repo(root):
+    """~/.claude/skills が、その上（~/.claude かそれより上）を一番上とする git リポジトリに入っていれば、その一番上。"""
+    top = repo_top(root)
+    real_root = os.path.realpath(root)
+    return top if top and top != real_root and real_root.startswith(top + os.sep) else None
+
+
+def my_past_emails(claude_dir):
+    """~/.claude を git で管理していれば、そこで本人がコミットに使ってきたアドレス（アドレスを変えた人の昔のスキルのため）。"""
+    root = os.path.join(claude_dir, "skills")
+    repo = home_config_repo(root) if os.path.isdir(root) else None
+    if not repo:
+        return frozenset()
+    out = git(["log", "-n", "2000", "--format=%ae"], repo) or ""
+    return frozenset(e.strip().lower() for e in out.split("\n") if e.strip())
+
+
+def discover_skill_dir(root, today, public_repos, user_level=False, my_emails=frozenset()):
     """root（…/.claude/skills）の中のスキル。他人の作は kind=external。
 
     公開扱い（実名を外に出す版に載せてよい）にするのは、配布元が vocab.json の公開の一覧にあるものだけ。
@@ -222,6 +268,7 @@ def discover_skill_dir(root, today, public_repos):
     skills = []
     if not os.path.isdir(root):
         return skills
+    home_repo = home_config_repo(root) if user_level else None
     for entry in sorted(os.listdir(root)):
         d = os.path.join(root, entry)
         md = os.path.join(d, "SKILL.md")
@@ -229,10 +276,11 @@ def discover_skill_dir(root, today, public_repos):
             continue
         try:
             with open(md, encoding="utf-8", errors="replace") as f:
-                fm = parse_frontmatter(f.read(20000))
+                body = f.read(200000)
         except OSError:
-            fm = {}
-        ext = others_work(md, public_repos)
+            body = ""
+        fm = parse_frontmatter(body[:20000])
+        ext = others_work(md, public_repos, home_repo, my_emails)
         if ext:
             material = valid_date(ext["installed"], today) or valid_date(entry_birth(d), today)
         else:
@@ -242,12 +290,13 @@ def discover_skill_dir(root, today, public_repos):
             "public": bool(ext and ext["public"]),
             "plugin": None, "description": fm.get("description", ""),
             "material_date": material.isoformat() if material else None,
+            "delegates_in_text": mentions_delegation(body),
         })
     return skills
 
 
 def discover_own_skills(claude_dir, today, vocab):
-    return discover_skill_dir(os.path.join(claude_dir, "skills"), today, known_public_repos(vocab))
+    return discover_skill_dir(os.path.join(claude_dir, "skills"), today, known_public_repos(vocab), user_level=True)
 
 
 def is_user_config(dot_claude):
@@ -283,7 +332,7 @@ def project_skill_roots(cwds, claude_dir):
 def discover_project_skills(cwds, claude_dir, today, vocab):
     skills = []
     for root in project_skill_roots(cwds, claude_dir):
-        skills.extend(discover_skill_dir(root, today, known_public_repos(vocab)))
+        skills.extend(discover_skill_dir(root, today, known_public_repos(vocab), my_emails=my_past_emails(claude_dir)))
     return skills
 
 
@@ -326,13 +375,15 @@ def discover_plugin_skills(claude_dir, today, vocab):
             entry = os.path.basename(os.path.dirname(md))
             try:
                 with open(md, encoding="utf-8", errors="replace") as f:
-                    fm = parse_frontmatter(f.read(20000))
+                    body = f.read(200000)
             except OSError:
-                fm = {}
+                body = ""
+            fm = parse_frontmatter(body[:20000])
             skills.append({
                 "id": "%s:%s" % (plugin, fm.get("name") or entry), "alias": entry, "kind": "plugin",
                 "public": public, "plugin": plugin, "description": fm.get("description", ""),
                 "material_date": installed_at.isoformat() if installed_at else None,
+                "delegates_in_text": mentions_delegation(body),
             })
     return skills, plugin_info
 
@@ -375,6 +426,21 @@ def human_text(d):
     return content
 
 
+def is_turn_start(d):
+    """人が何か送った行か（区切り）。human_text より広く、画像つき・origin の無い古い形・VS Code からの文も含む。"""
+    if d.get("type") != "user" or d.get("isSidechain") or d.get("isMeta") or d.get("toolUseResult"):
+        return False
+    if d.get("isCompactSummary") or d.get("entrypoint") == "sdk-cli":
+        return False
+    msg = d.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False
+        content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return isinstance(content, str) and not content.lstrip().startswith(NON_HUMAN_PREFIXES)
+
+
 def slash_command(d):
     """利用者が打った /名前 なら名前。"""
     if d.get("type") != "user" or d.get("isSidechain") or d.get("isMeta"):
@@ -410,9 +476,11 @@ def read_transcripts(claude_dir, today, log=eprint):
         "calls": [],     # (date, kind, name)  kind: skill | slash | agent
         "typed": [],     # (date, ts, text)
         "cwds": set(),
+        "delegations": {},  # 呼ばれたスキルの名前 -> そのあと人が打つまでに頼んだ回数
     }
     seen = set()
     for i, path in enumerate(files):
+        active = None  # いま動いているスキル（人が打つと終わる）
         try:
             fh = open(path, encoding="utf-8", errors="replace")
         except OSError:
@@ -451,7 +519,7 @@ def read_transcripts(claude_dir, today, log=eprint):
                 if not isinstance(d, dict) or "type" not in d or "message" not in d:
                     continue
                 ts = d.get("timestamp")
-                day = parse_date(ts)
+                day = local_day(ts)
                 if day is None:
                     continue
                 cwd = d.get("cwd")
@@ -473,8 +541,14 @@ def read_transcripts(claude_dir, today, log=eprint):
                         inp = b.get("input") or {}
                         if b.get("name") == "Skill" and isinstance(inp.get("skill"), str):
                             res["calls"].append((day, "skill", inp["skill"]))
+                            if active is not None and active != inp["skill"]:
+                                # 動いているスキルが別のスキルを呼んだ: 頼み1回。そのあとの頼みは呼ばれた側に付ける
+                                res["delegations"][active] = res["delegations"].get(active, 0) + 1
+                            active = inp["skill"]
                         elif b.get("name") in ("Agent", "Task"):
                             res["calls"].append((day, "agent", inp.get("subagent_type") or "general-purpose"))
+                            if active is not None:
+                                res["delegations"][active] = res["delegations"].get(active, 0) + 1
                     continue
                 uid = d.get("uuid")
                 if uid:
@@ -484,8 +558,11 @@ def read_transcripts(claude_dir, today, log=eprint):
                 cmd = slash_command(d)
                 if cmd:
                     res["calls"].append((day, "slash", cmd))
+                    active = cmd
                     continue
                 text = human_text(d)
+                if text is not None or is_turn_start(d):
+                    active = None
                 if text is not None and day >= win_start:
                     t = clean_typed(text)
                     if len(t) >= TYPED_MIN_CHARS:
@@ -589,7 +666,7 @@ def path_tokens(path, generic):
         if not part or part.startswith("."):
             continue
         for cand in [part] + re.split(r"[-_.\s]+", part):
-            if len(cand) >= 4 and cand.lower() not in generic and not cand.isdigit():
+            if len(cand) >= 4 and cand.lower() not in generic and not re.fullmatch(r"[\d\-_.:/]+", cand):
                 out.add(cand)
     return out
 
@@ -638,6 +715,18 @@ def _can_getuser():
 def is_builtin_skill(name, vocab):
     """Claude Code に最初から入っているスキル（ディスクに SKILL.md が無い）か。"""
     return name in vocab["builtin_skills"] or name.startswith(tuple(vocab["builtin_skill_prefixes"]))
+
+
+MANAGER_MIN_RUNS = 2
+
+
+def is_manager(skill, runs, delegations):
+    """まとめ役（ほかのスキルやサブエージェントに仕事を割り振るスキル）か。
+
+    手順書の書き方だけでも、会話の記録だけでも外れが多い（前置きに「サブエージェント」と書くスキル集、
+    参照用のスキルを読んだあとの作業）ので、両方がそろったときだけ。記録では、呼ばれるたびに平均1回以上頼んでいること。
+    """
+    return bool(skill.get("delegates_in_text")) and runs >= MANAGER_MIN_RUNS and delegations >= runs
 
 
 def resolve_skill(name, by_id, by_bare):
@@ -706,6 +795,12 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
         for sid, v in (r.get("employees") or {}).items():
             hist_emp[sid] = v
 
+    deleg = {}
+    for name, n in tr["delegations"].items():
+        s = resolve_skill(name, by_id, by_bare)
+        if s is not None:
+            deleg[s["id"]] = deleg.get(s["id"], 0) + n
+
     roster = []
     for s in skills:
         st = stats[s["id"]]
@@ -722,6 +817,7 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
             "first_used": st["first"].isoformat() if st["first"] else None,
             "last_used": last.isoformat() if last else None,
             "count_30d": st["n30"], "count_total": st["total"],
+            "manager": is_manager(s, st["total"], deleg.get(s["id"], 0)),
         })
 
     agent_list = []
@@ -794,7 +890,7 @@ def summary(c):
             sum(1 for x in c["skills"] if x["kind"] == "plugin"), len(c["agents"]), len(c["retired"])),
         "記録 %d ファイル・%d 行（読めなかった行 %d）／範囲 %s 〜 %s" % (
             s["files"], s["lines"], s["bad_lines"], c["range"]["oldest"], c["range"]["newest"]),
-        "人が打った文（この30日）%d 件、抜き出し %d 件（%d 字）" % (
+        "人が打った文（この30日）%d 件、抜き出し %d 件（%d 字。同じ文は1件にまとめ、多いときは日ごとに均して選ぶ）" % (
             c["typed"]["total_30d"], c["typed"]["sample_n"], c["typed"]["chars"]),
         "創業日 %s" % c["founded"],
     ]
@@ -816,7 +912,7 @@ def main(argv=None):
     if sys.version_info < (3, 9):
         eprint("Python 3.9 以上が必要です")
         return 2
-    today = date.fromisoformat(args.today) if args.today else datetime.now(timezone.utc).date()
+    today = date.fromisoformat(args.today) if args.today else date.today()  # 手元の時計の日付（日本で朝9時前でも前日にしない）
     history = args.history or os.path.join(os.path.dirname(os.path.abspath(args.out_dir)), "history.jsonl")
     c = collect(args.claude_dir, args.out_dir, today, history_path=history)
     print(summary(c))

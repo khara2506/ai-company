@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -274,6 +275,83 @@ class WhoMadeIt(unittest.TestCase):
         _, _, out = run_collect(h)
         self.assertEqual(os.stat(os.path.join(out, "typed.txt")).st_mode & 0o777, 0o600)
 
+    def test_own_skill_committed_with_an_old_address_stays_own(self):
+        """~/.claude のリポジトリに入れた自作スキルは、昔のアドレスで書いていても自作（アドレスを変えた人）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("old-mine")
+        h.git_commit_claude()  # 作者 t@example.invalid
+        subprocess.run(["git", "config", "user.email", "new-address@example.invalid"], cwd=h.claude, check=True)
+        h.finish_plugins()
+        c, _, _ = run_collect(h)
+        self.assertEqual(skill(c, "old-mine")["kind"], "own")
+
+    def test_skills_in_someone_elses_project_repo_are_not_own(self):
+        """人のリポジトリを clone して作業したとき、その .claude/skills は自作にしない（レビューの指摘）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.finish_plugins()
+        proj = h.make_workdir("oss-app")
+        d = os.path.join(proj, ".claude", "skills", "their-skill")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: their-skill\n---\n")
+        env = dict(os.environ, GIT_AUTHOR_NAME="O", GIT_AUTHOR_EMAIL="other@example.invalid",
+                   GIT_COMMITTER_NAME="O", GIT_COMMITTER_EMAIL="other@example.invalid")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=proj, check=True)
+        subprocess.run(["git", "add", "."], cwd=proj, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "x"], cwd=proj, check=True, env=env)
+        h.write_session("-oss-app", [h.user_line(TODAY, "このリポジトリで作業します", proj)])
+        c, _, _ = run_collect(h)
+        self.assertEqual(skill(c, "their-skill")["kind"], "external")
+
+    def test_collection_cloned_as_the_skills_folder_is_not_own(self):
+        """公開のスキル集を ~/.claude/skills そのものに clone した場合も他人の作（レビューの指摘）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        root = os.path.join(h.claude, "skills")
+        d = os.path.join(root, "kit-skill")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: kit-skill\n---\n")
+        env = dict(os.environ, GIT_AUTHOR_NAME="O", GIT_AUTHOR_EMAIL="other@example.invalid",
+                   GIT_COMMITTER_NAME="O", GIT_COMMITTER_EMAIL="other@example.invalid")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=root, check=True)
+        subprocess.run(["git", "add", "."], cwd=root, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "x"], cwd=root, check=True, env=env)
+        h.finish_plugins()
+        c, _, _ = run_collect(h)
+        self.assertEqual(skill(c, "kit-skill")["kind"], "external")
+
+    def test_own_project_skill_written_with_an_old_address_stays_own(self):
+        """~/.claude で昔使っていたアドレスで書いたプロジェクトのスキルは、アドレスを変えたあとも自作。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("mine")
+        h.git_commit_claude()  # 作者 t@example.invalid
+        subprocess.run(["git", "config", "user.email", "new@example.invalid"], cwd=h.claude, check=True)
+        h.finish_plugins()
+        proj = h.make_workdir("hq")
+        d = os.path.join(proj, ".claude", "skills", "tax-helper")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: tax-helper\n---\n")
+        env = dict(os.environ, GIT_AUTHOR_NAME="T", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="T", GIT_COMMITTER_EMAIL="t@example.invalid")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "new@example.invalid"], cwd=proj, check=True)
+        subprocess.run(["git", "add", "."], cwd=proj, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "x"], cwd=proj, check=True, env=env)
+        h.write_session("-hq", [h.user_line(TODAY, "本社で作業します", proj)])
+        c, _, _ = run_collect(h)
+        self.assertEqual(skill(c, "tax-helper")["kind"], "own")
+
     def test_my_own_repo_linked_in_stays_own(self):
         h = self.home()
         h.add_collection("dotfiles", ["mine"], author="t@example.invalid")  # 自分の作を symlink で入れた
@@ -338,6 +416,107 @@ class WhoMadeIt(unittest.TestCase):
         c, _, _ = run_collect(h)
         self.assertNotIn("ai-company:ai-company", [s["id"] for s in c["skills"]])
         self.assertEqual(c["stats"]["unmatched_calls"], 0)
+
+
+class Managers(unittest.TestCase):
+    """まとめ役: 手順書にサブエージェントを使うと書いてあり、記録でも呼ばれるたびに平均1回以上ほかに頼んでいるスキル。"""
+
+    def run_with(self, text, agent_calls_per_run, runs=2):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("boss", text)
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        lines = []
+        for r in range(runs):
+            d = TODAY - timedelta(days=r)
+            lines.append(h.user_line(d, "調べものをまとめてお願いします", cwd, hh=9))
+            lines.append(h.tool_use_line(d, "Skill", {"skill": "boss"}, cwd, hh=10))
+            for _ in range(agent_calls_per_run):
+                lines.append(h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=11))
+            lines.append(h.user_line(d, "ありがとう、次は別の話です", cwd, hh=12))
+            lines.append(h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=13))  # 人が打ったあとは数えない
+        h.write_session("-w", lines)
+        c, _, _ = run_collect(h)
+        return skill(c, "boss")["manager"]
+
+    def test_skill_that_hands_out_work_is_a_manager(self):
+        self.assertTrue(self.run_with("調べものを3つに分けてサブエージェントに頼み、結果をまとめる", 3))
+
+    def test_text_alone_is_not_enough(self):
+        self.assertFalse(self.run_with("必要ならサブエージェントを使う", 0))
+
+    def test_behavior_alone_is_not_enough(self):
+        self.assertFalse(self.run_with("請求書を作る", 3))
+
+    def test_work_after_the_person_types_is_not_counted(self):
+        """1回呼ぶごとに1回だけ頼み、人が打ったあとにたくさん頼む: 区切りが効けばまとめ役ではない。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("boss", "サブエージェントに頼む")
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        lines = []
+        for r in range(3):
+            d = TODAY - timedelta(days=r)
+            lines += [h.user_line(d, "お願いします、まとめてください", cwd, hh=9),
+                      h.tool_use_line(d, "Skill", {"skill": "boss"}, cwd, hh=10)]
+            if r == 0:
+                lines.append(h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=11))
+            lines.append(h.user_line(d, "次は別の作業をお願いします", cwd, hh=12))
+            lines += [h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=13) for _ in range(5)]
+        h.write_session("-w", lines)
+        c, _, _ = run_collect(h)
+        self.assertFalse(skill(c, "boss")["manager"])
+
+    def test_skill_called_by_slash_and_nested_skill(self):
+        """/boss で呼ぶ経路と、参照用のスキルを先に読んでから boss を呼ぶ経路（頼みは boss に付く）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("boss", "サブエージェントに頼む")
+        h.add_skill("ref", "サブエージェントの使い方の参考")
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        d1, d2 = TODAY, TODAY - timedelta(days=1)
+        h.write_session("-w", [
+            h.user_line(d1, "<command-name>/boss</command-name>", cwd, hh=9),
+            h.tool_use_line(d1, "Agent", {"subagent_type": "Explore"}, cwd, hh=10),  # 1回だけ。2日目の分が boss に付かないと2回に届かない
+            h.user_line(d2, "まとめてお願いします、急ぎです", cwd, hh=9),
+            h.tool_use_line(d2, "Skill", {"skill": "ref"}, cwd, hh=10),
+            h.tool_use_line(d2, "Skill", {"skill": "boss"}, cwd, hh=10),
+            h.tool_use_line(d2, "Agent", {"subagent_type": "Explore"}, cwd, hh=11),
+            h.tool_use_line(d2, "Agent", {"subagent_type": "Explore"}, cwd, hh=11),
+        ])
+        c, _, _ = run_collect(h)
+        self.assertTrue(skill(c, "boss")["manager"])
+        self.assertFalse(skill(c, "ref")["manager"])  # 呼ばれたのは1回、頼み（boss を呼んだ）も1回
+
+    def test_message_with_an_image_ends_the_skill(self):
+        """画像を貼った文も区切り（human_text は数えないが、人が送った行）。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.FakeHome(tmp.name)
+        h.add_skill("boss", "サブエージェントに頼む")
+        h.finish_plugins()
+        cwd = h.make_workdir("w")
+        lines = []
+        for r in range(2):
+            d = TODAY - timedelta(days=r)
+            lines += [h.user_line(d, "まとめてお願いします、急ぎです", cwd, hh=9),
+                      h.tool_use_line(d, "Skill", {"skill": "boss"}, cwd, hh=10)]
+            img = h.user_line(d, "x", cwd, hh=11).replace('"content":"x"',
+                '"content":[{"type":"text","text":"この画像を見て"},{"type":"image","source":{"type":"base64","data":"AA"}}]')
+            lines.append(img)
+            lines += [h.tool_use_line(d, "Agent", {"subagent_type": "Explore"}, cwd, hh=12) for _ in range(3)]
+        h.write_session("-w", lines)
+        c, _, _ = run_collect(h)
+        self.assertFalse(skill(c, "boss")["manager"])
+
+    def test_one_run_is_not_enough(self):
+        self.assertFalse(self.run_with("サブエージェントに頼む", 3, runs=1))
 
 
 class ProjectSkills(unittest.TestCase):
@@ -509,6 +688,13 @@ class Counting(unittest.TestCase):
         self.assertEqual(typed, [])
 
 
+    def test_summary_says_why_sample_is_smaller(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        h = fakes.make_home(tmp.name, "small")
+        c, _, _ = run_collect(h)
+        self.assertIn("同じ文は1件にまとめ", collect.summary(c))
+
     def test_short_replies_are_not_typed(self):
         """「はい」「続けて」などの短い返事は作業の種類が分からないので抜き出さない（2026-10-09 本人の環境で半分強がこれだった）。"""
         tmp = tempfile.TemporaryDirectory()
@@ -569,6 +755,12 @@ class PrivacyOfWorkFile(unittest.TestCase):
         for sample in fakes.TYPED_SAMPLES:
             self.assertNotIn(sample, raw)
         self.assertTrue(typed)
+
+    def test_dates_in_folder_names_are_not_seeds(self):
+        tokens = collect.path_tokens("/home/u/notes/2026-08-31/globex_2026", set())
+        self.assertIn("globex", tokens)  # 固有の語は残る
+        self.assertNotIn("2026-08-31", tokens)  # 日付・数字だけの語は入社日などとぶつかるので集めない
+        self.assertNotIn("2026", tokens)
 
     def test_seeds_contain_customer_path_and_remote(self):
         tmp = tempfile.TemporaryDirectory()
