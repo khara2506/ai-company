@@ -174,7 +174,8 @@ def build_model(company, org, vocab, history_rows=None):
         emps.append({"id": s["id"], "kind": s["kind"], "public": s["public"], "dept": dept,
                      "title": title, "local": s["id"], "share": share, "joined": j, "last_used": lu,
                      "n30": s.get("count_30d", 0), "total": s.get("count_total", 0), "status": status,
-                     "real_allowed": bool(people.get(s["id"], {}).get("real_name_allowed"))})
+                     "real_allowed": bool(people.get(s["id"], {}).get("real_name_allowed")),
+                     "manager": bool(s.get("manager"))})
     retired = []
     for s in company.get("retired", []):
         dept, title, share = person(s["id"], False)
@@ -340,6 +341,24 @@ def fit(s, size, max_w):
 
 # ---------------------------------------------------------------- 画像（SVG）
 
+HIRE_LABEL = {"own": "自作", "external": "中途入社（スキル集）", "plugin": "中途入社（プラグイン）"}
+
+# この会社の見方（会社の言葉, Claude Code では）。固定の文なので外に出す版にも載せてよい
+GLOSSARY = [
+    ("代表（あなた）", "Claude に仕事を頼む人"),
+    ("社員", "自分で作ったスキル。決まった仕事の手順を覚えた担当（例: 請求書づくり）"),
+    ("まとめ役", "ほかのスキルやサブエージェントに仕事を割り振るスキル（例: 調べものを手分けして頼み、結果をまとめる）"),
+    ("中途入社", "他の人が作ったスキル集やプラグインから入ったスキル"),
+    ("外部スタッフ", "サブエージェントと、Claude Code に最初から入っているスキル。社員数には入れない"),
+    ("求人", "手で何度も頼んでいるのに、担当するスキルがいない仕事"),
+]
+
+
+def headcount(emps):
+    own = sum(1 for e in emps if e["kind"] == "own")
+    return own, len(emps) - own, sum(1 for e in emps if e.get("manager"))
+
+
 def alt_text(m, mode):
     name = m["name"]
     if not m["emps"]:
@@ -412,7 +431,7 @@ def build_svg(m, mode="share"):
             '<tspan font-size="116" fill="%s">%d</tspan><tspan font-size="56" fill="%s"> 名</tspan></text>'
             % (M, base, C["primary"], C["muted"], C["primary"], len(m["emps"]), C["text"]))
         seal(W - M - 66, base - 44, 66, "在籍")
-        txt(M, base + 58, "この30日の新入社員 %d名" % len(m["new_hires"]), 36, C["muted"])
+        txt(M, base + 58, "うち自作 %d名 ／ この30日の入社 %d名" % (headcount(m["emps"])[0], len(m["new_hires"])), 36, C["muted"])
         y = base + 80
         rule(y)
         y += 36
@@ -504,6 +523,13 @@ details[open]>summary::after{content:"⌄"}
 ul.plain{list-style:none;margin:0;padding:0 0 8px 0}
 ul.plain li{padding:6px 0;border-top:1px solid var(--rule)}
 .meta{color:var(--muted);font-size:13px}
+.idcard summary{flex-wrap:wrap;column-gap:12px;row-gap:0;padding:6px 0}
+.idcard .meta{order:3;flex-basis:100%}
+details.glossary{border:0;margin:0 0 12px}
+details.glossary>summary{color:var(--primary);font-weight:700}
+details.glossary dl{margin:0 0 8px;padding:8px 16px;background:var(--sheet);border-left:4px solid var(--rule-strong)}
+details.glossary dt{font-weight:700;margin-top:8px}
+details.glossary dd{margin:0;color:var(--muted);font-size:14px;line-height:1.6}
 .idcard{border:0;border-bottom:1px solid var(--rule)}
 .idcard .body{background:var(--sheet);border:1px solid var(--rule-strong);border-radius:12px;padding:12px 16px;margin:4px 0 12px;box-shadow:0 8px 24px -12px rgba(0,0,0,.25)}
 .idcard .body .head{font-size:12px;color:var(--faint);border-bottom:1px solid var(--rule-strong);padding-bottom:4px;margin-bottom:8px}
@@ -625,9 +651,15 @@ def build_html(m, mode, svg=None):
     sec_open("overview", "会社概要")
     if not share:
         w('<div class="notice" role="note"><b>注意</b>この版は実名入りです。人に送らないでください（共有用は share.html）。</div>')
-    facts = [("社員", "%d名" % len(emps)), ("部署", "%d" % len(m["dept_rows"])),
-             ("外部スタッフ", "%d" % len(m["agents"])), ("創業", d2s(m["founded"])), ("期", "第%d期" % m["period"])]
+    own_n, hired_n, mgr_n = headcount(emps)
+    staff = "%d名（自作 %d・中途入社 %d）" % (len(emps), own_n, hired_n) if emps else "0名"
+    facts = [("社員", staff), ("部署", "%d" % len(m["dept_rows"]))]
+    if mgr_n:
+        facts.append(("まとめ役", "%d名" % mgr_n))
+    facts += [("外部スタッフ", "%d" % len(m["agents"])), ("創業", d2s(m["founded"])), ("期", "第%d期" % m["period"])]
     w('<dl class="facts">%s</dl>' % "".join("<dt>%s</dt><dd>%s</dd>" % (esc(k), esc(v)) for k, v in facts))
+    w('<details class="glossary"><summary>この会社の見方（言葉の説明）</summary><dl>%s</dl></details>' % "".join(
+        "<dt>%s</dt><dd>%s</dd>" % (esc(k), esc(v)) for k, v in GLOSSARY))
     if emps:
         w('<p><span class="seal" aria-hidden="true">在籍</span></p>')
     if m["has_records"]:
@@ -671,11 +703,16 @@ def build_html(m, mode, svg=None):
         w('<h3>%s（%d名）</h3>' % (esc(dn), c))
 
         def card(e):
-            return ('<details class="idcard"><summary><span>%s</span><span class="meta">入社 %s ・ この30日 %d回</span></summary>'
+            hire = HIRE_LABEL.get(e["kind"], "自作")
+            meta = "%s%s %s ・ この30日 %d回" % ("まとめ役 ・ " if e.get("manager") else "", hire.split("（")[0],
+                                               d2s(e["joined"]) or "入社日不明", e["n30"])
+            role = ('<dt>役割</dt><dd>まとめ役（ほかの社員や外部スタッフに仕事を割り振る）</dd>' if e.get("manager") else "")
+            return ('<details class="idcard"><summary><span>%s</span><span class="meta">%s</span></summary>'
                     '<div class="body"><div class="head">AI 社員証</div><dl><dt>名前</dt><dd>%s</dd><dt>所属</dt><dd>%s</dd>'
+                    '<dt>採用</dt><dd>%s</dd>%s'
                     '<dt>入社日</dt><dd>%s</dd><dt>この30日</dt><dd>%d回</dd><dt>通算</dt><dd>%d回</dd><dt>状態</dt><dd>%s</dd></dl></div></details>'
-                    % (esc(person_label(e, mode)), esc(d2s(e["joined"]) or "不明"), e["n30"],
-                       esc(person_label(e, mode)), esc(m["dept_name"].get(did, dn)), esc(d2s(e["joined"]) or "不明"),
+                    % (esc(person_label(e, mode)), esc(meta),
+                       esc(person_label(e, mode)), esc(m["dept_name"].get(did, dn)), esc(hire), role, esc(d2s(e["joined"]) or "不明"),
                        e["n30"], e["total"], esc(e["status"])))
         w("".join(card(e) for e in members[:ROSTER_LIMIT]))
         if len(members) > ROSTER_LIMIT:

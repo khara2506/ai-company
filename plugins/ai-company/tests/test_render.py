@@ -309,6 +309,37 @@ class Titles(unittest.TestCase):
         self.assertEqual(again["letters"], org["letters"])
 
 
+class CompanyWords(unittest.TestCase):
+    """普通の人にも分かるように、区分・まとめ役・この会社の見方を出す（2026-10-21 オーナー指示）。"""
+
+    def env_with_manager(self, manager):
+        env = Env(self, "small")
+        c = json.load(open(os.path.join(env.work, "company.json"), encoding="utf-8"))
+        own = [s for s in c["skills"] if s["kind"] == "own"]
+        own[0]["manager"] = manager
+        json.dump(c, open(os.path.join(env.work, "company.json"), "w", encoding="utf-8"), ensure_ascii=False)
+        return env, c
+
+    def test_share_has_breakdown_glossary_and_hire_kind(self):
+        env, c = self.env_with_manager(True)
+        rc, out = env.run("--approve")
+        self.assertIn("STATUS: done", out)
+        html = env.read("share.html")
+        own = sum(1 for s in c["skills"] if s["kind"] == "own")
+        self.assertIn("%d名（自作 %d・中途入社 %d）" % (len(c["skills"]), own, len(c["skills"]) - own), html)
+        self.assertIn("この会社の見方", html)
+        self.assertIn("サブエージェント", html)
+        self.assertIn("<dt>まとめ役</dt><dd>1名</dd>", html)
+        self.assertIn("<dt>採用</dt><dd>中途入社（プラグイン）</dd>", html)
+        self.assertIn("まとめ役 ・ 自作 2026-", html)
+        self.assertIn("うち自作 %d名" % own, html)  # 画像の行
+
+    def test_no_manager_row_when_none(self):
+        env, _ = self.env_with_manager(False)
+        env.run("--approve")
+        self.assertNotRegex(env.read("share.html"), r"<dt>まとめ役</dt><dd>\d+名</dd>")  # 見方の説明の行は残る
+
+
 class OrgPlace(unittest.TestCase):
     def test_org_written_in_work_folder_is_used_and_moved(self):
         """手順3で org.json を work/ に書いても、黙って無視しない（2026-10-21 試しで会社名が消えた）。"""
