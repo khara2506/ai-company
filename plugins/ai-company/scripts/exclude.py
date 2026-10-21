@@ -3,6 +3,7 @@
 指定は ~/.claude/ai-company/exclude.json（{"version": 1, "dirs": ["~/clients"]}）と collect.py の --exclude。
 org.json と分けているのは、手順3で Claude が org.json を書き直すときの巻き添えにしないため。
 """
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,11 @@ WALK_DEPTH = 4  # 読まないフォルダの下で .claude/skills を探す深�
 
 class ExcludeError(ValueError):
     pass
+
+
+def name_hash(name):
+    """スキルの名前の代わりに company.json に書く印。render.py が org.json・history.jsonl から落とす分を見分けるのに使う。"""
+    return hashlib.sha256(("ai-company-exclude:" + name).encode("utf-8")).hexdigest()[:16]
 
 
 def folder_key(path):
@@ -45,6 +51,8 @@ class Excluder:
         self._forms = sorted({_fold(t) for t in tops})
         self._keys = sorted({_fold(folder_key(t)) for t in tops})
         self._cache = {}
+        self._hit = set()  # 外した行の作業フォルダ（メモリの中だけ）
+        self._skipped = set()  # 開かずに飛ばした記録のフォルダ名
         self.folders = self.files = self.lines = 0
 
     def __bool__(self):
@@ -56,7 +64,10 @@ class Excluder:
     def covers_folder(self, name):
         """会話の記録のフォルダ名が、読まないフォルダ（とその下）のものか。~/clients-old のような似た名前も外れる（安全側）。"""
         n = _fold(name)
-        return any(not k.strip("-") or n == k or n.startswith(k + "-") for k in self._keys)
+        hit = any(not k.strip("-") or n == k or n.startswith(k + "-") for k in self._keys)
+        if hit:
+            self._skipped.add(n)
+        return hit
 
     def covers(self, path):
         hit = self._cache.get(path)
@@ -64,24 +75,39 @@ class Excluder:
             cands = {_fold(os.path.normpath(path)), _fold(os.path.realpath(path))}
             hit = any(_under(c, t) for c in cands for t in self._forms)
             self._cache[path] = hit
+            if hit:
+                self._hit.add(path)
         return hit
 
     def skill_names(self):
         """読まないフォルダの下にある .claude/skills のスキルの名前。前に数えた分を退職として出さないため（ファイルには書かない）。"""
         names = set()
+        # 開かずに飛ばした記録のフォルダ名から、元の作業フォルダを名前の形でたどって探す（記録は開かない）
+        for top in self.tops:
+            if not self._skipped or top == os.sep or not os.path.isdir(top):
+                continue
+            for root, dirs, _ in os.walk(top):
+                if _fold(folder_key(root)) in self._skipped:
+                    self._hit.add(root)
+                dirs[:] = [d for d in dirs
+                           if any(w.startswith(_fold(folder_key(os.path.join(root, d)))) for w in self._skipped)]
+        # collect.py は外した行の作業フォルダから上へたどってスキルを数えていたので、同じたどり方で集める（深さによらず一致する）
+        for path in sorted(self._hit):
+            d = path
+            while d and os.path.isabs(d) and self.covers(d):
+                names |= _skill_dir_names(os.path.join(d, ".claude", "skills"))
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
         for top in self.tops:
             if top == os.sep or not os.path.isdir(top):
                 continue
             base = top.rstrip(os.sep).count(os.sep)
-            for root, dirs, _ in os.walk(top):
+            for root, dirs, _ in os.walk(top):  # 読めないフォルダは os.walk が黙って飛ばす
                 if os.path.basename(root) == ".claude":
                     dirs[:] = []
-                    skills = os.path.join(root, "skills")
-                    for entry in (os.listdir(skills) if os.path.isdir(skills) else []):
-                        names.add(entry)
-                        name = _front_name(os.path.join(skills, entry, "SKILL.md"))
-                        if name:
-                            names.add(name)
+                    names |= _skill_dir_names(os.path.join(root, "skills"))
                     continue
                 if root.count(os.sep) - base >= WALK_DEPTH:
                     dirs[:] = []
@@ -101,6 +127,21 @@ class Excluder:
                 continue
             names |= {e for e in entries if not e.startswith(".") and os.path.isdir(os.path.join(top, e))}
         return names
+
+
+def _skill_dir_names(skills):
+    """読めない場所は飛ばす（例外の文に顧客のパスが出るため）。"""
+    names = set()
+    try:
+        entries = os.listdir(skills) if os.path.isdir(skills) else []
+    except OSError:
+        return names
+    for entry in entries:
+        names.add(entry)
+        name = _front_name(os.path.join(skills, entry, "SKILL.md"))
+        if name:
+            names.add(name)
+    return names
 
 
 def _front_name(md):

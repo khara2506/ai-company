@@ -901,7 +901,8 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
                   "chars": sum(len(t[2]) for t in selected), "found": bool(tr["typed"]),
                   "has_transcripts": tr["files"] > 0},
         "seeds": seeds,
-        "exclude": {"dirs": len(skip.dirs), "folders": skip.folders, "files": skip.files, "lines": skip.lines},
+        "exclude": {"dirs": len(skip.dirs), "folders": skip.folders, "files": skip.files, "lines": skip.lines,
+                    "drop": sorted(exclusion.name_hash(n) for n in gone)},
     }
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "company.json"), "w", encoding="utf-8") as f:

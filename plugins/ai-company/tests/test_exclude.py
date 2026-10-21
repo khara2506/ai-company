@@ -62,7 +62,7 @@ class SkipFolders(Base):
         c = self.collect([self.clients])
         self.assertIn("週報", self.typed())
         self.assertNotIn("Globex", self.typed())
-        self.assertEqual(c["exclude"], {"dirs": 1, "folders": 1, "files": 1, "lines": 0})
+        self.assertEqual({k: v for k, v in c["exclude"].items() if k != "drop"}, {"dirs": 1, "folders": 1, "files": 1, "lines": 0})
         self.assertFalse(any("globex" in t.lower() for t in c["seeds"]["paths"]))
 
     def test_lines_after_cd_into_client_folder_are_not_counted(self):
@@ -126,6 +126,33 @@ class SkipFolders(Base):
         after = self.collect([self.clients])
         self.assertNotIn("globex-invoice", [s["id"] for s in after["skills"]])
         self.assertNotIn("globex-invoice", [r["id"] for r in after["retired"]])
+
+    def test_deep_client_skill_seen_before_is_not_retired(self):
+        deep = self.h.make_workdir("clients", "globex-corp", "a", "b", "c", "repo")  # 除外から深さ5
+        d = os.path.join(deep, ".claude", "skills", "globex-deep")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: globex-deep\ndescription: x\n---\n")
+        self.session(deep, [self.h.user_line(DAY, "Globex 様への見積もりを書いて", deep)])
+        os.makedirs(self.out, exist_ok=True)
+        with open(os.path.join(self.out, "history.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"date": (TODAY - timedelta(days=1)).isoformat(),
+                                "employees": {"globex-deep": ["2026-09-01", "2026-10-01", 3]}}) + "\n")
+        after = self.collect([self.clients])
+        self.assertNotIn("globex-deep", [r["id"] for r in after["retired"]])
+        self.assertIn(exclude.name_hash("globex-deep"), after["exclude"]["drop"])
+
+    def test_unreadable_folder_under_exclude_is_skipped_quietly(self):
+        locked = os.path.join(self.client_app, ".claude", "skills")
+        os.makedirs(locked)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o700)
+        if os.access(locked, os.R_OK):
+            self.skipTest("root では権限で読めなくできない")
+        self.session(self.client_app, [self.h.user_line(DAY, "Globex 様への見積もりを書いて", self.client_app)])
+        rc, out = self.main("--exclude", self.clients)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("globex", out.lower())
 
 
 class Settings(Base):
@@ -204,6 +231,23 @@ class Render(Base):
         with open(os.path.join(self.out, "org.json"), encoding="utf-8") as f:
             text = f.read()
         self.assertNotIn("globex", text)
+
+    def test_old_client_skill_is_removed_from_history(self):
+        d = os.path.join(self.client_app, ".claude", "skills", "globex-invoice")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: globex-invoice\ndescription: x\n---\n")
+        os.makedirs(self.out, exist_ok=True)
+        with open(os.path.join(self.out, "history.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"date": "2026-09-01", "employees": {"globex-invoice": ["2026-08-01", "2026-08-30", 2],
+                                                                    "weekly-report": ["2026-08-01", "2026-08-30", 5]},
+                                "employee_count": 2}) + "\n")
+        self.prepare({"company_name": "", "people": {}})
+        self.render("--no-share")
+        with open(os.path.join(self.out, "history.jsonl"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("globex", text)
+        self.assertIn("weekly-report", text)
 
     def test_letter_freed_by_removal_does_not_collide(self):
         org = render.normalize_org({"people": {"old": {"dept": "accounting"}, "x": {"dept": "accounting"},

@@ -966,7 +966,8 @@ def history_row(company, org, m):
     return {"date": company["today"], "range": rng, "employees": emp, "employee_count": len(emp), "depts": depts}
 
 
-def append_history(path, row):
+def append_history(path, row, drop=()):
+    """同じ日の行は置き換える。drop（読まない作業フォルダの下のスキル）は、前の行の社員からも消す。"""
     rows = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -976,10 +977,17 @@ def append_history(path, row):
     keep = []
     for ln in rows:
         try:
-            if json.loads(ln).get("date") == row["date"]:
-                continue
+            r = json.loads(ln)
         except ValueError:
-            pass
+            keep.append(ln)
+            continue
+        if isinstance(r, dict) and r.get("date") == row["date"]:
+            continue
+        emp = r.get("employees") if isinstance(r, dict) else None
+        if isinstance(emp, dict) and drop and any(k in drop for k in emp):
+            r["employees"] = {k: v for k, v in emp.items() if k not in drop}
+            r["employee_count"] = len(r["employees"])
+            ln = json.dumps(r, ensure_ascii=False, separators=(",", ":"))
         keep.append(ln)
     keep.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
     tmp = path + ".tmp"
@@ -1095,8 +1103,13 @@ def main(argv=None):
             print("STATUS: error\n%s を読めません（%s）。手順3で書いた形を直してから、もう一度実行してください"
                   % (org_path, raw_org if isinstance(raw_org, Exception) else "中身が {…} の形ではありません"))
             return 2
-    org = normalize_org(raw_org, company, vocab, warn=lambda s: print("注意: " + s), drop=skip.skill_names())
     rows = read_history(hist_path)
+    hashes = set((company.get("exclude") or {}).get("drop") or [])
+    known = set(raw_org.get("people") or {}) | {r.get("id") for r in company.get("retired", [])}
+    known |= {sid for v in (raw_org.get("letters") or {}).values() if isinstance(v, dict) for sid in v}
+    known |= {sid for r in rows for sid in (r.get("employees") or {})}
+    drop = {sid for sid in known if isinstance(sid, str) and exclusion.name_hash(sid) in hashes}
+    org = normalize_org(raw_org, company, vocab, warn=lambda s: print("注意: " + s), drop=drop)
 
     share_path = os.path.join(args.out_dir, "share.html")
     portal_path = os.path.join(args.out_dir, "portal.html")
@@ -1109,7 +1122,7 @@ def main(argv=None):
 
     def finish():
         write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
-        append_history(hist_path, history_row(company, org, m))
+        append_history(hist_path, history_row(company, org, m), drop)
 
     if args.no_share:
         finish()
