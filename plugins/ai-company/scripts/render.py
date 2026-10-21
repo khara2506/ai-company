@@ -23,6 +23,8 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 
+import exclude as exclusion
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_SHORT = "github.com/khara2506/ai-company"
 SKILL_DOC_URL = "https://code.claude.com/docs/en/skills"
@@ -88,12 +90,22 @@ def clean_company_name(s):
     return s[:40]
 
 
-def normalize_org(org, company, vocab, warn=lambda m: None):
-    """org.json に足りない所を既定で埋め、決まった一覧に無い値を直す。職名の記号を割り当てる。"""
+def next_letter(used):
+    i = 0
+    while letters_for(i) in used:
+        i += 1
+    return letters_for(i)
+
+
+def normalize_org(org, company, vocab, warn=lambda m: None, drop=()):
+    """org.json に足りない所を既定で埋め、決まった一覧に無い値を直す。職名の記号を割り当てる。
+
+    drop: 読まない作業フォルダの下のスキルの名前。前の実行で書いた分も org.json から消す。
+    """
     org = dict(org) if isinstance(org, dict) else {}
     org.setdefault("version", 1)
     org["company_name"] = clean_company_name(org.get("company_name"))
-    people = org["people"] = dict(org.get("people") or {})
+    people = org["people"] = {k: v for k, v in (org.get("people") or {}).items() if k not in drop}
     dept_ids = {d["id"] for d in vocab["departments"]}
     for sid, p in list(people.items()):
         if not isinstance(p, dict):
@@ -104,7 +116,8 @@ def normalize_org(org, company, vocab, warn=lambda m: None):
             p["dept"] = "general"
         p["real_name_allowed"] = bool(p.get("real_name_allowed"))
         people[sid] = p
-    org["letters"] = {k: dict(v) for k, v in (org.get("letters") or {}).items() if isinstance(v, dict)}
+    org["letters"] = {k: {sid: c for sid, c in v.items() if sid not in drop}
+                      for k, v in (org.get("letters") or {}).items() if isinstance(v, dict)}
     org["agent_letters"] = dict(org.get("agent_letters") or {})
     org["allowed_terms"] = [str(t) for t in (org.get("allowed_terms") or [])]
     work_ids = {w["id"] for w in vocab["works"]}
@@ -134,7 +147,7 @@ def normalize_org(org, company, vocab, warn=lambda m: None):
         people.setdefault(sid, {"dept": dept, "real_name_allowed": False})
         lm = org["letters"].setdefault(dept, {})
         if sid not in lm:
-            lm[sid] = letters_for(len(lm))
+            lm[sid] = next_letter(set(lm.values()))
     for a in sorted(a["id"] for a in company.get("agents", []) if a.get("own")):
         if a not in org["agent_letters"]:
             org["agent_letters"][a] = letters_for(len(org["agent_letters"]))
@@ -856,10 +869,13 @@ def name_parts(name, generic, min_len=4):
     return out
 
 
-def forbidden_terms(company, org, vocab):
-    """{小文字の語: 種類}。自作スキル・自作サブエージェントの名前、パス・git のリモート・利用者の名前。"""
+def forbidden_terms(company, org, vocab, excluded_names=()):
+    """{小文字の語: 種類}。自作スキル・自作サブエージェントの名前、パス・git のリモート・利用者の名前、読まない作業フォルダの名前。"""
     generic = set(vocab["generic_words"])
     terms = {}
+    for n in excluded_names:
+        for t in name_parts(n, generic):
+            terms.setdefault(t.lower(), "読まない作業フォルダの名前")
     people = org["people"]
     for s in list(company.get("skills", [])) + list(company.get("retired", [])):
         if s.get("public") or people.get(s["id"], {}).get("real_name_allowed"):
@@ -900,9 +916,9 @@ def term_hits(text, term):
     return term in text
 
 
-def scan_leaks(html_text, company, org, vocab):
+def scan_leaks(html_text, company, org, vocab, excluded_names=()):
     """[(種類, 語, 場所)]。語の照合は小文字。許可された名前は先に取り除く。"""
-    terms = forbidden_terms(company, org, vocab)
+    terms = forbidden_terms(company, org, vocab, excluded_names)
     blob = allowed_blob(company, vocab)
     allowed_names = [s["id"] for s in company.get("skills", []) if org["people"].get(s["id"], {}).get("real_name_allowed")]
     allowed_names += list(org.get("allowed_terms", []))
@@ -1061,7 +1077,25 @@ def main(argv=None):
             print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
         else:
             print("注意: %s は古いので読みません。会社名などは %s に書いてください" % (misplaced, org_path))
-    org = normalize_org(load_json(org_path, {}), company, vocab, warn=lambda s: print("注意: " + s))
+    try:
+        skip = exclusion.load(os.path.join(args.out_dir, exclusion.FILE_NAME))
+    except exclusion.ExcludeError as e:
+        print("STATUS: error\n%s。読まないフォルダが分からないので止まりました" % e)
+        return 2
+    excluded_names = skip.folder_names()  # 顧客名のことが多い。照合にだけ使い、ファイルには書かない
+    raw_org = {}
+    if os.path.exists(org_path):
+        try:
+            with open(org_path, encoding="utf-8") as f:
+                raw_org = json.load(f)
+        except (OSError, ValueError) as e:
+            raw_org = e
+        if not isinstance(raw_org, dict):
+            # 黙って空から作り直すと、会社名・実名の許可・職名が消える
+            print("STATUS: error\n%s を読めません（%s）。手順3で書いた形を直してから、もう一度実行してください"
+                  % (org_path, raw_org if isinstance(raw_org, Exception) else "中身が {…} の形ではありません"))
+            return 2
+    org = normalize_org(raw_org, company, vocab, warn=lambda s: print("注意: " + s), drop=skip.skill_names())
     rows = read_history(hist_path)
 
     share_path = os.path.join(args.out_dir, "share.html")
@@ -1089,15 +1123,15 @@ def main(argv=None):
         return mm, build_html(mm, "share", svg), bottom
 
     m, share_html, _ = build_share()
-    hits = scan_leaks(share_html, company, org, vocab)
+    hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     if hits and args.resolve == "allow":
         org["allowed_terms"] = sorted(set(org["allowed_terms"]) | {t for _, t, _ in hits})
         m, share_html, _ = build_share()
-        hits = scan_leaks(share_html, company, org, vocab)
+        hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     elif hits and args.resolve == "mask":
         org["company_name"] = mask_company_name(org["company_name"], {t for _, t, loc in hits if loc == "会社名"})
         m, share_html, _ = build_share()
-        hits = scan_leaks(share_html, company, org, vocab)
+        hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     if hits:
         # 語と場所は端末にだけ出す。ファイルには書かない（R2-6）
         for kind, term, loc in hits:
