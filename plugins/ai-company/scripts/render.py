@@ -1109,6 +1109,7 @@ def main(argv=None):
     known |= {sid for v in (raw_org.get("letters") or {}).values() if isinstance(v, dict) for sid in v}
     known |= {sid for r in rows for sid in (r.get("employees") or {})}
     drop = {sid for sid in known if isinstance(sid, str) and exclusion.name_hash(sid) in hashes}
+    drop -= {s["id"] for s in company.get("skills", [])}  # 外に同じ名前の社員がいれば消さない
     org = normalize_org(raw_org, company, vocab, warn=lambda s: print("注意: " + s), drop=drop)
 
     share_path = os.path.join(args.out_dir, "share.html")

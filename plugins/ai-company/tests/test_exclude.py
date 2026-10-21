@@ -232,6 +232,26 @@ class Render(Base):
             text = f.read()
         self.assertNotIn("globex", text)
 
+    def test_own_skill_with_the_same_name_as_a_client_skill_is_kept(self):
+        self.h.add_skill("deploy")
+        d = os.path.join(self.client_app, ".claude", "skills", "deploy")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: deploy\ndescription: x\n---\n")
+        os.makedirs(self.out, exist_ok=True)
+        with open(os.path.join(self.out, "history.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"date": "2026-09-01", "employees": {"deploy": ["2026-08-01", "2026-08-30", 2]},
+                                "employee_count": 1}) + "\n")
+        self.prepare({"company_name": "", "people": {"deploy": {"dept": "accounting", "real_name_allowed": True}},
+                      "letters": {"accounting": {"deploy": "A"}}})
+        self.render("--no-share")
+        with open(os.path.join(self.out, "org.json"), encoding="utf-8") as f:
+            org = json.load(f)
+        self.assertEqual(org["people"]["deploy"], {"dept": "accounting", "real_name_allowed": True})
+        self.assertEqual(org["letters"]["accounting"]["deploy"], "A")
+        with open(os.path.join(self.out, "history.jsonl"), encoding="utf-8") as f:
+            self.assertIn("deploy", f.readline())  # 2026-09-01 の行に残っている
+
     def test_old_client_skill_is_removed_from_history(self):
         d = os.path.join(self.client_app, ".claude", "skills", "globex-invoice")
         os.makedirs(d)

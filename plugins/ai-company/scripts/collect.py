@@ -879,7 +879,8 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
     founded_c = [d for d in [oldest, hist_first] + skill_joined if d]
     founded = min(founded_c) if founded_c else today
 
-    gone = skip.skill_names() if skip else set()  # 読まないフォルダの下のスキルは、退職としても出さない
+    # 読まないフォルダの下のスキルは、退職としても出さない。同じ名前の社員が外にいれば、その人は残す
+    gone = (skip.skill_names() if skip else set()) - {r["id"] for r in roster}
     hist_ranges = [parse_date(x) for r in rows for x in (r.get("range") or []) if parse_date(x)]
     seeds = collect_seeds(tr["cwds"], vocab["generic_words"], claude_dir)
 
