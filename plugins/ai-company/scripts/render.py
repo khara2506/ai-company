@@ -23,6 +23,8 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 
+import exclude as exclusion
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_SHORT = "github.com/khara2506/ai-company"
 SKILL_DOC_URL = "https://code.claude.com/docs/en/skills"
@@ -83,17 +85,37 @@ def load_json(path, default):
         return default
 
 
+JOB_DETAIL_CHARS = 60
+JOB_EXAMPLE_CHARS = 80
+JOB_EXAMPLES = 3
+
+
+def clean_line(s, limit):
+    s = re.sub(r"[\x00-\x1f\x7f]", " ", str(s or "")).strip()
+    return s[:limit]
+
+
 def clean_company_name(s):
     s = re.sub(r"[\x00-\x1f\x7f<>]", "", str(s or "")).strip()
     return s[:40]
 
 
-def normalize_org(org, company, vocab, warn=lambda m: None):
-    """org.json に足りない所を既定で埋め、決まった一覧に無い値を直す。職名の記号を割り当てる。"""
+def next_letter(used):
+    i = 0
+    while letters_for(i) in used:
+        i += 1
+    return letters_for(i)
+
+
+def normalize_org(org, company, vocab, warn=lambda m: None, drop=()):
+    """org.json に足りない所を既定で埋め、決まった一覧に無い値を直す。職名の記号を割り当てる。
+
+    drop: 読まない作業フォルダの下のスキルの名前。前の実行で書いた分も org.json から消す。
+    """
     org = dict(org) if isinstance(org, dict) else {}
     org.setdefault("version", 1)
     org["company_name"] = clean_company_name(org.get("company_name"))
-    people = org["people"] = dict(org.get("people") or {})
+    people = org["people"] = {k: v for k, v in (org.get("people") or {}).items() if k not in drop}
     dept_ids = {d["id"] for d in vocab["departments"]}
     for sid, p in list(people.items()):
         if not isinstance(p, dict):
@@ -104,10 +126,12 @@ def normalize_org(org, company, vocab, warn=lambda m: None):
             p["dept"] = "general"
         p["real_name_allowed"] = bool(p.get("real_name_allowed"))
         people[sid] = p
-    org["letters"] = {k: dict(v) for k, v in (org.get("letters") or {}).items() if isinstance(v, dict)}
+    org["letters"] = {k: {sid: c for sid, c in v.items() if sid not in drop}
+                      for k, v in (org.get("letters") or {}).items() if isinstance(v, dict)}
     org["agent_letters"] = dict(org.get("agent_letters") or {})
     org["allowed_terms"] = [str(t) for t in (org.get("allowed_terms") or [])]
     work_ids = {w["id"] for w in vocab["works"]}
+    today = company.get("today")
     jobs = {}
     for j in org.get("jobs") or []:
         if not isinstance(j, dict):
@@ -119,9 +143,20 @@ def normalize_org(org, company, vocab, warn=lambda m: None):
             cnt = max(0, int(j.get("count", 0)))
         except (TypeError, ValueError):
             cnt = 0
-        cur = jobs.setdefault(w, {"work": w, "count": 0, "covered": True})
+        cur = jobs.setdefault(w, {"work": w, "count": 0, "covered": True, "detail": "", "examples": []})
         cur["count"] += cnt
         cur["covered"] = cur["covered"] and bool(j.get("covered"))
+        # 具体的に何を頼んでいるか（手元の版だけに出す。外に出す版には載せない）
+        # 前の実行で書いた分（made が今回の日と違う）は使わない。読まないフォルダを後から足したとき、前に写した文を残さないため
+        fresh = j.get("made") in (None, today)
+        cur["detail"] = cur["detail"] or (clean_line(j.get("detail"), JOB_DETAIL_CHARS) if fresh else "")
+        for ex in (j.get("examples") or []) if fresh else []:
+            ex = clean_line(ex, JOB_EXAMPLE_CHARS) if isinstance(ex, str) else ""
+            if ex and ex not in cur["examples"] and len(cur["examples"]) < JOB_EXAMPLES:
+                cur["examples"].append(ex)
+    for cur in jobs.values():
+        if cur["detail"] or cur["examples"]:
+            cur["made"] = today
     org["jobs"] = sorted(jobs.values(), key=lambda x: x["work"])
 
     emps = sorted(company.get("skills", []), key=lambda s: (s.get("joined") or "9999", s["id"]))
@@ -134,7 +169,7 @@ def normalize_org(org, company, vocab, warn=lambda m: None):
         people.setdefault(sid, {"dept": dept, "real_name_allowed": False})
         lm = org["letters"].setdefault(dept, {})
         if sid not in lm:
-            lm[sid] = letters_for(len(lm))
+            lm[sid] = next_letter(set(lm.values()))
     for a in sorted(a["id"] for a in company.get("agents", []) if a.get("own")):
         if a not in org["agent_letters"]:
             org["agent_letters"][a] = letters_for(len(org["agent_letters"]))
@@ -216,13 +251,14 @@ def build_model(company, org, vocab, history_rows=None):
     prefix = "少なくとも" if small else ("約" if sampled else "")
     jobs = []
     for j in org["jobs"]:
-        if j["covered"] or j["work"] == vocab["other_work"]["id"] or sample_n <= 0:
+        if (j["covered"] or j["work"] == vocab["other_work"]["id"] or sample_n <= 0
+                or works[j["work"]].get("job") is False):  # 質問のように毎回中身が違うものは求人に出さない
             continue
         est = round(j["count"] * total / sample_n) if sampled and not small else j["count"]
         if est >= JOB_MIN:
             w = works[j["work"]]
             jobs.append({"work": w["name"], "dept": depts[w["dept"]]["title"], "est": est, "sampled": sampled,
-                         "prefix": prefix})
+                         "prefix": prefix, "detail": j.get("detail", ""), "examples": j.get("examples", [])})
     jobs.sort(key=lambda x: (-x["est"], x["work"]))
     jobs = jobs[:JOB_MAX]
 
@@ -546,6 +582,7 @@ td.r,th.r{text-align:right}
 .job h3{margin:0 0 4px}
 .job .kv{margin:4px 0}
 .prompt{background:var(--sheet);border:1px solid var(--rule-strong);border-radius:4px;padding:12px;font-size:14px;line-height:1.6}
+.examples{margin:4px 0 12px;padding-left:1.2em;font-size:14px;line-height:1.6}.examples li{margin:2px 0;overflow-wrap:anywhere}
 button,a.btn{min-height:44px;padding:8px 16px;border-radius:8px;font:inherit;cursor:pointer;display:inline-flex;align-items:center;text-decoration:none}
 button.primary{background:var(--primary);color:var(--on-primary);border:0}
 button.secondary,a.btn{background:transparent;color:var(--primary);border:1px solid var(--primary)}
@@ -616,11 +653,17 @@ def person_label(e, mode):
     return "%s（%s）" % (e["local"], e["title"])
 
 
-def job_prompt(j):
-    return ("「%s」を、ふだん手で何度も頼んでいます（この30日で%s%d回）。"
-            "この作業を自動でやってくれる Claude Code のスキルを作ってください。"
-            "最初に、いつもどう頼んでいるかを私に聞いてから、SKILL.md の案を出してください。"
-            % (j["work"], j["prefix"], j["est"]))
+def job_prompt(j, local=False):
+    """local: 手元の版。打った文の例を入れて、スキル作りを具体的に始められるようにする。"""
+    what = "「%s」" % j["work"]
+    if local and j.get("detail"):
+        what += "（%s）" % j["detail"]
+    text = ("%sを、ふだん手で何度も頼んでいます（この30日で%s%d回）。"
+            "この作業を自動でやってくれる Claude Code のスキルを作ってください。" % (what, j["prefix"], j["est"]))
+    if local and j.get("examples"):
+        return text + ("たとえば次のように頼んでいます: %s。これを元に、足りないことを私に聞いてから、SKILL.md の案を出してください。"
+                       % " / ".join("「%s」" % e for e in j["examples"]))
+    return text + "最初に、いつもどう頼んでいるかを私に聞いてから、SKILL.md の案を出してください。"
 
 
 EMPTY_PROMPT = ("Claude Code で毎回手で頼んでいる作業を1つ選んで、それを自動でやってくれるスキルを作ってください。"
@@ -774,11 +817,17 @@ def build_html(m, mode, svg=None):
         elif m["sampled"]:
             w('<p class="small">人が打った文の抜き出し（最大300件）からの推定です。</p>')
         for i, j in enumerate(m["jobs"]):
-            w('<div class="job"><h3>求人：%s</h3><p class="kv">仕事の内容：%s</p><p class="kv">この30日で%s%d回、手で対応</p>'
-              '<p class="small">いちばん大事なこと：この作業をスキルにする</p>'
+            w('<div class="job"><h3>求人：%s</h3><p class="kv">仕事の内容：%s</p>' % (esc(j["dept"]), esc(j["work"])))
+            if not share and j.get("detail"):
+                w('<p class="kv">具体的には：%s</p>' % esc(j["detail"]))
+            w('<p class="kv">この30日で%s%d回、手で対応</p>' % (j["prefix"], j["est"]))
+            if not share and j.get("examples"):
+                w('<p class="small">あなたが打った文の例</p><ul class="examples">%s</ul>'
+                  % "".join("<li>%s</li>" % esc(e) for e in j["examples"]))
+            w('<p class="small">いちばん大事なこと：この作業をスキルにする</p>'
               '<p class="prompt" id="jp-%d">%s</p><div class="actions"><button class="primary" type="button" data-copy="jp-%d">依頼文をコピー</button>'
               '<a class="btn" href="%s">スキルの作り方（公式）</a></div></div>' % (
-                  esc(j["dept"]), esc(j["work"]), j["prefix"], j["est"], i, esc(job_prompt(j)), i, SKILL_DOC_URL))
+                  i, esc(job_prompt(j, local=not share)), i, SKILL_DOC_URL))
     w("</section></main>")
     w("<footer>")
     if share:
@@ -856,10 +905,13 @@ def name_parts(name, generic, min_len=4):
     return out
 
 
-def forbidden_terms(company, org, vocab):
-    """{小文字の語: 種類}。自作スキル・自作サブエージェントの名前、パス・git のリモート・利用者の名前。"""
+def forbidden_terms(company, org, vocab, excluded_names=()):
+    """{小文字の語: 種類}。自作スキル・自作サブエージェントの名前、パス・git のリモート・利用者の名前、読まない作業フォルダの名前。"""
     generic = set(vocab["generic_words"])
     terms = {}
+    for n in excluded_names:
+        for t in name_parts(n, generic):
+            terms.setdefault(t.lower(), "読まない作業フォルダの名前")
     people = org["people"]
     for s in list(company.get("skills", [])) + list(company.get("retired", [])):
         if s.get("public") or people.get(s["id"], {}).get("real_name_allowed"):
@@ -900,9 +952,9 @@ def term_hits(text, term):
     return term in text
 
 
-def scan_leaks(html_text, company, org, vocab):
+def scan_leaks(html_text, company, org, vocab, excluded_names=()):
     """[(種類, 語, 場所)]。語の照合は小文字。許可された名前は先に取り除く。"""
-    terms = forbidden_terms(company, org, vocab)
+    terms = forbidden_terms(company, org, vocab, excluded_names)
     blob = allowed_blob(company, vocab)
     allowed_names = [s["id"] for s in company.get("skills", []) if org["people"].get(s["id"], {}).get("real_name_allowed")]
     allowed_names += list(org.get("allowed_terms", []))
@@ -950,7 +1002,8 @@ def history_row(company, org, m):
     return {"date": company["today"], "range": rng, "employees": emp, "employee_count": len(emp), "depts": depts}
 
 
-def append_history(path, row):
+def append_history(path, row, drop=()):
+    """同じ日の行は置き換える。drop（読まない作業フォルダの下のスキル）は、前の行の社員からも消す。"""
     rows = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -960,10 +1013,17 @@ def append_history(path, row):
     keep = []
     for ln in rows:
         try:
-            if json.loads(ln).get("date") == row["date"]:
-                continue
+            r = json.loads(ln)
         except ValueError:
-            pass
+            keep.append(ln)
+            continue
+        if isinstance(r, dict) and r.get("date") == row["date"]:
+            continue
+        emp = r.get("employees") if isinstance(r, dict) else None
+        if isinstance(emp, dict) and drop and any(k in drop for k in emp):
+            r["employees"] = {k: v for k, v in emp.items() if k not in drop}
+            r["employee_count"] = len(r["employees"])
+            ln = json.dumps(r, ensure_ascii=False, separators=(",", ":"))
         keep.append(ln)
     keep.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
     tmp = path + ".tmp"
@@ -988,10 +1048,14 @@ def read_history(path):
     return sorted(rows, key=lambda r: r["date"])
 
 
-def write_atomic(path, text):
+def write_atomic(path, text, private=False):
+    """private: 本人だけが読める（打った文の例・実名が入る portal.html と org.json）。"""
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
+    if private:
+        os.chmod(tmp, 0o600)  # 前に残った .tmp の権限も直す
     os.replace(tmp, path)
 
 
@@ -1037,6 +1101,7 @@ def main(argv=None):
         return 2
     vocab = load_vocab()
     os.makedirs(args.out_dir, exist_ok=True)
+    os.chmod(args.out_dir, 0o700)  # 実名・打った文の例が入るので本人だけ
     org_path = args.org or os.path.join(args.out_dir, "org.json")
     hist_path = args.history or os.path.join(args.out_dir, "history.jsonl")
     company = load_json(os.path.join(args.work_dir, "company.json"), {})
@@ -1054,6 +1119,7 @@ def main(argv=None):
         if not os.path.exists(org_path):
             try:
                 os.replace(misplaced, org_path)
+                os.chmod(org_path, 0o600)
             except OSError as e:
                 print("STATUS: error\norg.json を %s から %s に移せませんでした（%s）。手で移してから、もう一度実行してください"
                       % (misplaced, org_path, e.strerror or e))
@@ -1061,8 +1127,32 @@ def main(argv=None):
             print("注意: org.json が %s にありました。%s に移して使います" % (misplaced, org_path))
         else:
             print("注意: %s は古いので読みません。会社名などは %s に書いてください" % (misplaced, org_path))
-    org = normalize_org(load_json(org_path, {}), company, vocab, warn=lambda s: print("注意: " + s))
+    try:
+        skip = exclusion.load(os.path.join(args.out_dir, exclusion.FILE_NAME))
+    except exclusion.ExcludeError as e:
+        print("STATUS: error\n%s。読まないフォルダが分からないので止まりました" % e)
+        return 2
+    excluded_names = skip.folder_names()  # 顧客名のことが多い。照合にだけ使い、ファイルには書かない
+    raw_org = {}
+    if os.path.exists(org_path):
+        try:
+            with open(org_path, encoding="utf-8") as f:
+                raw_org = json.load(f)
+        except (OSError, ValueError) as e:
+            raw_org = e
+        if not isinstance(raw_org, dict):
+            # 黙って空から作り直すと、会社名・実名の許可・職名が消える
+            print("STATUS: error\n%s を読めません（%s）。手順3で書いた形を直してから、もう一度実行してください"
+                  % (org_path, raw_org if isinstance(raw_org, Exception) else "中身が {…} の形ではありません"))
+            return 2
     rows = read_history(hist_path)
+    hashes = set((company.get("exclude") or {}).get("drop") or [])
+    known = set(raw_org.get("people") or {}) | {r.get("id") for r in company.get("retired", [])}
+    known |= {sid for v in (raw_org.get("letters") or {}).values() if isinstance(v, dict) for sid in v}
+    known |= {sid for r in rows for sid in (r.get("employees") or {})}
+    drop = {sid for sid in known if isinstance(sid, str) and exclusion.name_hash(sid) in hashes}
+    drop -= {s["id"] for s in company.get("skills", [])}  # 外に同じ名前の社員がいれば消さない
+    org = normalize_org(raw_org, company, vocab, warn=lambda s: print("注意: " + s), drop=drop)
 
     share_path = os.path.join(args.out_dir, "share.html")
     portal_path = os.path.join(args.out_dir, "portal.html")
@@ -1070,12 +1160,12 @@ def main(argv=None):
         os.remove(share_path)  # 前回の分は最初に消す（R2-8）
 
     m = build_model(company, org, vocab, rows)
-    write_atomic(portal_path, build_html(m, "local"))
+    write_atomic(portal_path, build_html(m, "local"), private=True)
     print("手元の版: %s" % portal_path)
 
     def finish():
-        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
-        append_history(hist_path, history_row(company, org, m))
+        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1), private=True)
+        append_history(hist_path, history_row(company, org, m), drop)
 
     if args.no_share:
         finish()
@@ -1089,15 +1179,15 @@ def main(argv=None):
         return mm, build_html(mm, "share", svg), bottom
 
     m, share_html, _ = build_share()
-    hits = scan_leaks(share_html, company, org, vocab)
+    hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     if hits and args.resolve == "allow":
         org["allowed_terms"] = sorted(set(org["allowed_terms"]) | {t for _, t, _ in hits})
         m, share_html, _ = build_share()
-        hits = scan_leaks(share_html, company, org, vocab)
+        hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     elif hits and args.resolve == "mask":
         org["company_name"] = mask_company_name(org["company_name"], {t for _, t, loc in hits if loc == "会社名"})
         m, share_html, _ = build_share()
-        hits = scan_leaks(share_html, company, org, vocab)
+        hits = scan_leaks(share_html, company, org, vocab, excluded_names)
     if hits:
         # 語と場所は端末にだけ出す。ファイルには書かない（R2-6）
         for kind, term, loc in hits:
@@ -1108,7 +1198,7 @@ def main(argv=None):
                   "その語が取引先や案件の名前なら、会社名を変えるか --resolve mask。本人が出してよいと言ったときだけ --resolve allow"
                   % (" / ".join(named), "・".join(sorted({k for k, t, _ in hits if t in named}))))
         print("share.html は書いていません。続け方: --resolve mask（伏せ字にして作り直す）／--resolve allow（この語を許可する）／やめる")
-        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
+        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1), private=True)
         print("STATUS: leak")
         return 3
     code = approval_code(share_html)
@@ -1118,7 +1208,7 @@ def main(argv=None):
         print("外に出す版に載る文字列（これ以外は載りません）:")
         for kind, vals in share_strings(m):
             print("  [%s] %s" % (kind, " / ".join(vals)))
-        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1))
+        write_atomic(org_path, json.dumps(org, ensure_ascii=False, indent=1), private=True)
         print("APPROVE_CODE: %s" % code)
         print("STATUS: awaiting-approval")
         return 0

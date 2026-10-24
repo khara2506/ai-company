@@ -18,6 +18,8 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 
+import exclude as exclusion
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WINDOW_DAYS = 30
 MAX_TYPED = 300
@@ -308,8 +310,8 @@ def is_user_config(dot_claude):
     return os.path.isdir(os.path.join(dot_claude, "projects"))
 
 
-def project_skill_roots(cwds, claude_dir):
-    """作業したフォルダとその上にある .claude/skills（Claude Code がプロジェクトのスキルとして読む場所）。"""
+def project_skill_roots(cwds, claude_dir, skip=None):
+    """作業したフォルダとその上にある .claude/skills（Claude Code がプロジェクトのスキルとして読む場所）。読まないフォルダの下は除く。"""
     user_root = os.path.realpath(os.path.join(claude_dir, "skills"))
     roots, seen = [], {user_root}
     for c in sorted(cwds):
@@ -317,7 +319,7 @@ def project_skill_roots(cwds, claude_dir):
         while d and os.path.isabs(d):
             cand = os.path.join(d, ".claude", "skills")
             if (os.path.isdir(cand) and os.sep + os.path.join(".claude", "worktrees") + os.sep not in cand
-                    and not is_user_config(os.path.dirname(cand))):
+                    and not is_user_config(os.path.dirname(cand)) and not (skip and skip.covers(cand))):
                 real = os.path.realpath(cand)
                 if real not in seen:
                     seen.add(real)
@@ -329,9 +331,9 @@ def project_skill_roots(cwds, claude_dir):
     return roots
 
 
-def discover_project_skills(cwds, claude_dir, today, vocab):
+def discover_project_skills(cwds, claude_dir, today, vocab, skip=None):
     skills = []
-    for root in project_skill_roots(cwds, claude_dir):
+    for root in project_skill_roots(cwds, claude_dir, skip):
         skills.extend(discover_skill_dir(root, today, known_public_repos(vocab), my_emails=my_past_emails(claude_dir)))
     return skills
 
@@ -464,9 +466,23 @@ def project_files(claude_dir):
     return sorted(out)
 
 
-def read_transcripts(claude_dir, today, log=eprint):
-    """会話の記録を1回なめて、必要なものだけ取り出す。"""
+def read_transcripts(claude_dir, today, log=eprint, skip=None):
+    """会話の記録を1回なめて、必要なものだけ取り出す。
+
+    skip（読まない作業フォルダ）のフォルダの記録は開かない。ほかの記録でも、作業フォルダが skip の下にある行は数えない
+    （会話の途中で cd して入った分。cwd の無い行は、同じファイルで最後に見た cwd で決める）。
+    """
     files = project_files(claude_dir)
+    if skip:
+        kept, dropped = [], set()
+        for p in files:
+            folder = os.path.basename(os.path.dirname(p))
+            if skip.covers_folder(folder):
+                dropped.add(folder)
+                skip.files += 1
+            else:
+                kept.append(p)
+        files, skip.folders = kept, len(dropped)
     total_bytes = sum(os.path.getsize(p) for p in files if os.path.exists(p))
     if files:
         log("会話の記録を読んでいます（%d ファイル・約 %s）" % (len(files), human_size(total_bytes)))
@@ -481,6 +497,7 @@ def read_transcripts(claude_dir, today, log=eprint):
     seen = set()
     for i, path in enumerate(files):
         active = None  # いま動いているスキル（人が打つと終わる）
+        last_cwd = None
         try:
             fh = open(path, encoding="utf-8", errors="replace")
         except OSError:
@@ -494,6 +511,16 @@ def read_transcripts(claude_dir, today, log=eprint):
                 if not line.endswith("}"):
                     res["bad_lines"] += 1
                     continue
+                if skip:
+                    m = CWD_RE.search(line)
+                    if m:
+                        try:
+                            last_cwd = json.loads('"%s"' % m.group(1))
+                        except ValueError:
+                            last_cwd = m.group(1)
+                    if last_cwd and skip.covers(last_cwd):
+                        skip.lines += 1
+                        continue
                 m = DATE_RE.search(line)
                 day = parse_date(m.group(1)) if m else None
                 if day and day <= today + timedelta(days=1):
@@ -523,6 +550,9 @@ def read_transcripts(claude_dir, today, log=eprint):
                 if day is None:
                     continue
                 cwd = d.get("cwd")
+                if skip and isinstance(cwd, str) and skip.covers(cwd):
+                    skip.lines += 1
+                    continue
                 if isinstance(cwd, str) and len(res["cwds"]) < 5000:
                     res["cwds"].add(cwd)
                 if is_assist:
@@ -737,11 +767,12 @@ def resolve_skill(name, by_id, by_bare):
     return None
 
 
-def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=None):
+def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=None, skip=None):
     vocab = vocab or load_vocab()
-    tr = read_transcripts(claude_dir, today, log=log)
+    skip = skip or exclusion.Excluder()
+    tr = read_transcripts(claude_dir, today, log=log, skip=skip)
     own = discover_own_skills(claude_dir, today, vocab)
-    proj = discover_project_skills(tr["cwds"], claude_dir, today, vocab)
+    proj = discover_project_skills(tr["cwds"], claude_dir, today, vocab, skip)
     plug, plugin_info = discover_plugin_skills(claude_dir, today, vocab)
     skills = own + proj + plug
     # 同じ id が重なったら先のものだけ
@@ -848,6 +879,8 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
     founded_c = [d for d in [oldest, hist_first] + skill_joined if d]
     founded = min(founded_c) if founded_c else today
 
+    # 読まないフォルダの下のスキルは、退職としても出さない。同じ名前の社員が外にいれば、その人は残す
+    gone = (skip.skill_names() if skip else set()) - {r["id"] for r in roster}
     hist_ranges = [parse_date(x) for r in rows for x in (r.get("range") or []) if parse_date(x)]
     seeds = collect_seeds(tr["cwds"], vocab["generic_words"], claude_dir)
 
@@ -864,13 +897,16 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
                   "unmatched_calls": unmatched},
         "skills": roster,
         "agents": agent_list,
-        "retired": retired_from_history(rows, [r["id"] for r in roster], today),
+        "retired": [r for r in retired_from_history(rows, [r["id"] for r in roster], today) if r["id"] not in gone],
         "typed": {"total_30d": len(tr["typed"]), "sample_n": len(selected),
                   "chars": sum(len(t[2]) for t in selected), "found": bool(tr["typed"]),
                   "has_transcripts": tr["files"] > 0},
         "seeds": seeds,
+        "exclude": {"dirs": len(skip.dirs), "folders": skip.folders, "files": skip.files, "lines": skip.lines,
+                    "drop": sorted(exclusion.name_hash(n) for n in gone)},
     }
     os.makedirs(out_dir, exist_ok=True)
+    os.chmod(out_dir, 0o700)  # 打った文の抜き出しが入るので本人だけ
     with open(os.path.join(out_dir, "company.json"), "w", encoding="utf-8") as f:
         json.dump(company, f, ensure_ascii=False, indent=1)
     typed_path = os.path.join(out_dir, "typed.txt")
@@ -898,6 +934,14 @@ def summary(c):
         lines.append("人が打った文を見つけられませんでした（記録の形が変わった可能性）")
     if c["retention_days"] is not None:
         lines.append("記録の保持日数 %s 日" % c["retention_days"])
+    ex = c.get("exclude") or {}
+    if ex.get("dirs"):
+        lines.append("読まない作業フォルダ %d か所: 記録のフォルダ %d・ファイル %d・行 %d を外しました" % (
+            ex["dirs"], ex["folders"], ex["files"], ex["lines"]))
+        if not (ex["folders"] or ex["lines"]):
+            lines.append("注意: 読まない作業フォルダの指定が、どの記録にも当たっていません（打ち間違いでないか確かめてください）")
+        elif ex["files"] and not s["files"] and not ex["lines"]:
+            lines.append("注意: すべての記録を外しました")
     return "\n".join(lines)
 
 
@@ -908,14 +952,29 @@ def main(argv=None):
     ap.add_argument("--out-dir", default=os.path.join(home, "ai-company", "work"))
     ap.add_argument("--history", default=None, help="history.jsonl（既定は out-dir の1つ上）")
     ap.add_argument("--today", default=None, help="YYYY-MM-DD（テスト用）")
+    ap.add_argument("--exclude", action="append", default=[], metavar="DIR",
+                    help="読まない作業フォルダ（くり返し可）。既定で out-dir の1つ上の exclude.json も読む")
     args = ap.parse_args(argv)
     if sys.version_info < (3, 9):
         eprint("Python 3.9 以上が必要です")
         return 2
     today = date.fromisoformat(args.today) if args.today else date.today()  # 手元の時計の日付（日本で朝9時前でも前日にしない）
-    history = args.history or os.path.join(os.path.dirname(os.path.abspath(args.out_dir)), "history.jsonl")
-    c = collect(args.claude_dir, args.out_dir, today, history_path=history)
+    base = os.path.dirname(os.path.abspath(args.out_dir))
+    stale = os.path.join(args.out_dir, "typed.txt")
+    if os.path.exists(stale):
+        os.remove(stale)  # 前の実行の抜き出しを、止まったときにも残さない
+    history = args.history or os.path.join(base, "history.jsonl")
+    try:
+        skip = exclusion.load(os.path.join(base, exclusion.FILE_NAME), args.exclude)
+    except exclusion.ExcludeError as e:
+        eprint("STATUS: error\n%s。読まないフォルダが分からないので、何も読まずに止まりました" % e)
+        return 2
+    for d in skip.missing():
+        eprint("注意: 読まない作業フォルダが見つかりません: %s" % d)
+    c = collect(args.claude_dir, args.out_dir, today, history_path=history, skip=skip)
     print(summary(c))
+    if skip:
+        print("読まない作業フォルダ: %s" % " ".join(skip.dirs))
     return 0
 
 

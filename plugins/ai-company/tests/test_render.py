@@ -588,5 +588,57 @@ class OrgJsonOutputsOnly(unittest.TestCase):
         self.assertTrue(letters)
 
 
+class ConcreteJobs(unittest.TestCase):
+    """求人票に、具体的に何を頼んでいるかと打った文の例を出す（2026-10-24 オーナー「中身が分かりづらい」）。"""
+
+    JOBS = [{"work": "todo_mgmt", "count": 30, "covered": False, "detail": "朝にその日の TODO を読んで並べ替える",
+             "examples": ["今日の TODO を見せて", "終わったものに印を付けて", "期限の近い順に並べて", "4件目は捨てる"]},
+            {"work": "learning", "count": 90, "covered": False, "detail": "用語やエラーの意味を聞く",
+             "examples": ["この用語の意味は？"]}]
+
+    def env(self):
+        return Env(self, "small", org={"company_name": "", "people": {}, "jobs": [dict(j) for j in self.JOBS]})
+
+    def test_local_version_shows_detail_and_examples_and_share_does_not(self):
+        env = self.env()
+        rc, out = env.run("--approve")
+        self.assertEqual(rc, 0, out)
+        portal, share = env.read("portal.html"), env.read("share.html")
+        self.assertIn("朝にその日の TODO を読んで並べ替える", portal)
+        self.assertIn("今日の TODO を見せて", portal)
+        self.assertNotIn("4件目は捨てる", portal)  # 例は3件まで
+        self.assertIn("たとえば次のように頼んでいます", portal)  # 依頼文にも例が入る
+        for text in ("朝にその日の TODO", "今日の TODO を見せて", "たとえば次のように"):
+            self.assertNotIn(text, share)
+        self.assertIn("タスクの整理", share)
+
+    def test_questions_are_not_a_job(self):
+        env = self.env()
+        env.run("--no-share")
+        self.assertNotIn("学習・勉強の補助", env.read("portal.html").split('id="jobs"')[1])
+
+    def test_examples_from_an_earlier_run_are_not_reused(self):
+        env = self.env()
+        env.run("--no-share")
+        org = env.org()
+        self.assertTrue(all(j.get("made") == env.company["today"] for j in org["jobs"] if j["examples"]))
+        for j in org["jobs"]:
+            if j["examples"]:
+                j["made"] = "2026-09-01"  # 前の実行で写した例が残っている
+        with open(os.path.join(env.out, "org.json"), "w", encoding="utf-8") as f:
+            json.dump(org, f, ensure_ascii=False)
+        env.run("--no-share")
+        portal = env.read("portal.html")
+        self.assertNotIn("今日の TODO を見せて", portal)
+        self.assertIn("タスクの整理", portal)  # 回数は残る
+
+    def test_portal_and_org_are_readable_only_by_the_owner(self):
+        env = self.env()
+        env.run("--no-share")
+        for name in ("portal.html", "org.json"):
+            self.assertEqual(os.stat(os.path.join(env.out, name)).st_mode & 0o777, 0o600, name)
+        self.assertEqual(os.stat(env.out).st_mode & 0o777, 0o700)
+
+
 if __name__ == "__main__":
     unittest.main()
