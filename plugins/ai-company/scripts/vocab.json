@@ -198,7 +198,8 @@
   {
    "id": "learning",
    "name": "学習・勉強の補助",
-   "dept": "research"
+   "dept": "research",
+   "job": false
   },
   {
    "id": "code_feature",

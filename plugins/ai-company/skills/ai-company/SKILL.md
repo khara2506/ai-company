@@ -70,8 +70,13 @@ PY $PLUGIN/scripts/collect.py
 
 集計して `org.json` の `jobs` に書く:
 ```json
-"jobs": [{"work": "invoice", "count": 12, "covered": false}]
+"jobs": [{"work": "invoice", "count": 12, "covered": false,
+          "detail": "月末に取引先ごとの請求書を作る", "examples": ["今月の請求書を作って", "…", "…"]}]
 ```
+- `detail`: その作業で具体的に何を頼んでいるかを1行（60字まで）。種類の名前（「タスクの整理」）の言い直しでなく、何を・いつ・どうするかが分かる文にする
+- `examples`: `typed.txt` から、その作業をよく表す文を3件まで、そのまま写す（80字まで）。似た文は1件にする
+- `detail` と `examples` は手元の版（`portal.html`）にだけ出る。外に出す版には載らない。`covered: true` の作業には書かなくてよい
+- `learning`（質問・調べもの）は毎回中身が違うので、求人票には出ない（分類はする）
 - `count`: 抜き出しの中でその作業に分類した件数（全件へ当てはめる計算は render.py がする）
 - `covered`: すでにその作業をするスキルが `skills` にあれば `true`
 - 境目（月5回以上）は render.py が判定する。ここでは絞らない
@@ -82,7 +87,7 @@ PY $PLUGIN/scripts/collect.py
 ```json
 {"version":1,"company_name":"…","people":{"<skill id>":{"dept":"accounting","real_name_allowed":false}},"jobs":[…]}
 ```
-書き終えたら `typed.txt` を消す（会話の文を残さない）。`exclude.json` はここでは書かない。
+書き終えたら `typed.txt` を消す（会話の文は `examples` の分だけ残す。`org.json` と `portal.html` は本人だけが読める権限で書かれる）。`exclude.json` はここでは書かない。
 
 ## 手順4: 画面を作る
 
