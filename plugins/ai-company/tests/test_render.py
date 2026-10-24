@@ -617,11 +617,27 @@ class ConcreteJobs(unittest.TestCase):
         env.run("--no-share")
         self.assertNotIn("学習・勉強の補助", env.read("portal.html").split('id="jobs"')[1])
 
+    def test_examples_from_an_earlier_run_are_not_reused(self):
+        env = self.env()
+        env.run("--no-share")
+        org = env.org()
+        self.assertTrue(all(j.get("made") == env.company["today"] for j in org["jobs"] if j["examples"]))
+        for j in org["jobs"]:
+            if j["examples"]:
+                j["made"] = "2026-09-01"  # 前の実行で写した例が残っている
+        with open(os.path.join(env.out, "org.json"), "w", encoding="utf-8") as f:
+            json.dump(org, f, ensure_ascii=False)
+        env.run("--no-share")
+        portal = env.read("portal.html")
+        self.assertNotIn("今日の TODO を見せて", portal)
+        self.assertIn("タスクの整理", portal)  # 回数は残る
+
     def test_portal_and_org_are_readable_only_by_the_owner(self):
         env = self.env()
         env.run("--no-share")
         for name in ("portal.html", "org.json"):
             self.assertEqual(os.stat(os.path.join(env.out, name)).st_mode & 0o777, 0o600, name)
+        self.assertEqual(os.stat(env.out).st_mode & 0o777, 0o700)
 
 
 if __name__ == "__main__":

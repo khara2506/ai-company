@@ -131,6 +131,7 @@ def normalize_org(org, company, vocab, warn=lambda m: None, drop=()):
     org["agent_letters"] = dict(org.get("agent_letters") or {})
     org["allowed_terms"] = [str(t) for t in (org.get("allowed_terms") or [])]
     work_ids = {w["id"] for w in vocab["works"]}
+    today = company.get("today")
     jobs = {}
     for j in org.get("jobs") or []:
         if not isinstance(j, dict):
@@ -146,11 +147,16 @@ def normalize_org(org, company, vocab, warn=lambda m: None, drop=()):
         cur["count"] += cnt
         cur["covered"] = cur["covered"] and bool(j.get("covered"))
         # 具体的に何を頼んでいるか（手元の版だけに出す。外に出す版には載せない）
-        cur["detail"] = cur["detail"] or clean_line(j.get("detail"), JOB_DETAIL_CHARS)
-        for ex in j.get("examples") or []:
+        # 前の実行で書いた分（made が今回の日と違う）は使わない。読まないフォルダを後から足したとき、前に写した文を残さないため
+        fresh = j.get("made") in (None, today)
+        cur["detail"] = cur["detail"] or (clean_line(j.get("detail"), JOB_DETAIL_CHARS) if fresh else "")
+        for ex in (j.get("examples") or []) if fresh else []:
             ex = clean_line(ex, JOB_EXAMPLE_CHARS) if isinstance(ex, str) else ""
             if ex and ex not in cur["examples"] and len(cur["examples"]) < JOB_EXAMPLES:
                 cur["examples"].append(ex)
+    for cur in jobs.values():
+        if cur["detail"] or cur["examples"]:
+            cur["made"] = today
     org["jobs"] = sorted(jobs.values(), key=lambda x: x["work"])
 
     emps = sorted(company.get("skills", []), key=lambda s: (s.get("joined") or "9999", s["id"]))
@@ -1095,6 +1101,7 @@ def main(argv=None):
         return 2
     vocab = load_vocab()
     os.makedirs(args.out_dir, exist_ok=True)
+    os.chmod(args.out_dir, 0o700)  # 実名・打った文の例が入るので本人だけ
     org_path = args.org or os.path.join(args.out_dir, "org.json")
     hist_path = args.history or os.path.join(args.out_dir, "history.jsonl")
     company = load_json(os.path.join(args.work_dir, "company.json"), {})
@@ -1112,6 +1119,7 @@ def main(argv=None):
         if not os.path.exists(org_path):
             try:
                 os.replace(misplaced, org_path)
+                os.chmod(org_path, 0o600)
             except OSError as e:
                 print("STATUS: error\norg.json を %s から %s に移せませんでした（%s）。手で移してから、もう一度実行してください"
                       % (misplaced, org_path, e.strerror or e))

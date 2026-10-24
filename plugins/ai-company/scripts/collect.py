@@ -906,6 +906,7 @@ def collect(claude_dir, out_dir, today, history_path=None, log=eprint, vocab=Non
                     "drop": sorted(exclusion.name_hash(n) for n in gone)},
     }
     os.makedirs(out_dir, exist_ok=True)
+    os.chmod(out_dir, 0o700)  # 打った文の抜き出しが入るので本人だけ
     with open(os.path.join(out_dir, "company.json"), "w", encoding="utf-8") as f:
         json.dump(company, f, ensure_ascii=False, indent=1)
     typed_path = os.path.join(out_dir, "typed.txt")
